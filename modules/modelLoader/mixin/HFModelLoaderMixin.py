@@ -290,7 +290,7 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
             None,
         )
 
-    def _prepare_sub_modules(self, pretrained_model_name_or_path: str, diffusers_modules: list[str], transformers_modules: list[str]):
+    def _prepare_sub_modules(self, pretrained_model_name_or_path: str, diffusers_modules: list[str], transformers_modules: list[str], ignore_patterns: list[str] | None = None):
         is_local = os.path.isdir(pretrained_model_name_or_path)
         if is_local:
             return
@@ -298,10 +298,20 @@ class HFModelLoaderMixin(metaclass=ABCMeta):
         diffusers_paths = [((folder + "/") if folder else "") + "diffusion_pytorch_model*" for folder in diffusers_modules]
         transformers_paths = [((folder + "/") if folder else "") + "model*" for folder in transformers_modules]
         transformers_paths.extend([((folder + "/") if folder else "") + "pytorch_model*" for folder in transformers_modules])
+
+        default_ignore = [
+            "**/*fp16*",  # note the **/
+            "*fp16*",  # for fp16 files that live in the root
+        ]
+
+        # merge default ignore patterns with model specific ones (later on)
+        merged_ignore = default_ignore + (ignore_patterns or [])
+
         try:
             huggingface_hub.snapshot_download(
                 pretrained_model_name_or_path,
                 allow_patterns=diffusers_paths + transformers_paths,
+                ignore_patterns=merged_ignore,
             )
         except huggingface_hub.errors.HFValidationError:
             pass
