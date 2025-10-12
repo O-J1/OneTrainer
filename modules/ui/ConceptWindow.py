@@ -95,6 +95,9 @@ class ConceptWindow(ctk.CTkToplevel):
         self.bucket_fig = None
         self.bucket_ax = None
 
+        self._is_destroying = False
+        self._scan_lock = threading.Lock()
+
         self.title("Concept")
         self.geometry("800x700")
         self.resizable(True, True)
@@ -110,6 +113,8 @@ class ConceptWindow(ctk.CTkToplevel):
         self.text_augmentation_tab = self.__text_augmentation_tab(tabview.add("text augmentation"))
         self.concept_stats_tab = self.__concept_stats_tab(tabview.add("statistics"))
 
+        self.cancel_scan_flag = threading.Event()
+
         #automatic concept scan
         self.scan_thread = threading.Thread(target=self.__auto_update_concept_stats, daemon=True)
         self.scan_thread.start()
@@ -120,6 +125,8 @@ class ConceptWindow(ctk.CTkToplevel):
         self.grab_set()
         self.focus_set()
         self.after(200, lambda: set_window_icon(self))
+
+        self.protocol("WM_DELETE_WINDOW", self.__on_closing)
 
 
     def __general_tab(self, master, concept: ConceptConfig):
@@ -866,37 +873,55 @@ class ConceptWindow(ctk.CTkToplevel):
         return aspect_string
 
     def __get_concept_stats(self, advanced_checks: bool, wait_time: float):
+        if self._is_destroying:
+            return
+
         if not os.path.isdir(self.concept.path):
             print(f"Unable to get statistics for invalid concept path: {self.concept.path}")
             return
+
         start_time = time.perf_counter()
         last_update = time.perf_counter()
         self.cancel_scan_flag.clear()
-        self.concept_stats_tab.after(0, self.__disable_scan_buttons)
-        concept_path = self.get_concept_path(self.concept.path)
 
-        if not concept_path:
-           print(f"Unable to get statistics for invalid concept path: {self.concept.path}")
-           self.concept_stats_tab.after(0, self.__enable_scan_buttons)
-           return
-        subfolders = [concept_path]
+        # Use lock to prevent multiple scans
+        with self._scan_lock:
+            if self._is_destroying:
+                return
 
-        stats_dict = concept_stats.init_concept_stats(advanced_checks)
-        for path in subfolders:
-            if self.cancel_scan_flag.is_set() or time.perf_counter() - start_time > wait_time:
-                break
-            stats_dict = concept_stats.folder_scan(path, stats_dict, advanced_checks, self.concept, start_time, wait_time, self.cancel_scan_flag)
-            if self.concept.include_subdirectories and not self.cancel_scan_flag.is_set():     #add all subfolders of current directory to for loop
-                subfolders.extend([f for f in os.scandir(path) if f.is_dir()])
-            self.concept.concept_stats = stats_dict
-            #update GUI approx every half second
-            if time.perf_counter() > (last_update + 0.5):
-                last_update = time.perf_counter()
+            if not os.path.isdir(self.concept.path):
+                print(f"Unable to get statistics for invalid concept path: {self.concept.path}")
+                return
+
+            if not self._is_destroying:
+                self.concept_stats_tab.after(0, self.__disable_scan_buttons)
+            concept_path = self.get_concept_path(self.concept.path)
+
+            if not concept_path:
+               print(f"Unable to get statistics for invalid concept path: {self.concept.path}")
+               if not self._is_destroying:
+                   self.concept_stats_tab.after(0, self.__enable_scan_buttons)
+               return
+
+            subfolders = [concept_path]
+
+            stats_dict = concept_stats.init_concept_stats(advanced_checks)
+            for path in subfolders:
+                if self.cancel_scan_flag.is_set() or time.perf_counter() - start_time > wait_time or self._is_destroying:
+                    break
+                stats_dict = concept_stats.folder_scan(path, stats_dict, advanced_checks, self.concept, start_time, wait_time, self.cancel_scan_flag)
+                if self.concept.include_subdirectories and not self.cancel_scan_flag.is_set() and not self._is_destroying: #add all subfolder of current director to for loop
+                    subfolders.extend([f for f in os.scandir(path) if f.is_dir()])
+                self.concept.concept_stats = stats_dict
+                #update GUI approx every half second
+                if time.perf_counter() > (last_update + 0.5) and not self._is_destroying:
+                    last_update = time.perf_counter()
+                    self.concept_stats_tab.after(0, self.__update_concept_stats)
+
+            self.cancel_scan_flag.clear()
+            if not self._is_destroying:
+                self.concept_stats_tab.after(0, self.__enable_scan_buttons)
                 self.concept_stats_tab.after(0, self.__update_concept_stats)
-
-        self.cancel_scan_flag.clear()
-        self.concept_stats_tab.after(0, self.__enable_scan_buttons)
-        self.concept_stats_tab.after(0, self.__update_concept_stats)
 
     def __get_concept_stats_threaded(self, advanced_checks : bool, waittime : float):
         self.scan_thread = threading.Thread(target=self.__get_concept_stats, args=[advanced_checks, waittime], daemon=True)
@@ -925,13 +950,31 @@ class ConceptWindow(ctk.CTkToplevel):
                 if self.concept.concept_stats["processing_time"] < 0.1:
                     self.__get_concept_stats(True, 2)    #do advanced scan automatically if basic took <0.1s
 
+    def __on_closing(self):
+        self._is_destroying = True
+        self.cancel_scan_flag.set()
+        self.destroy()
+
     def __ok(self):
+        self._is_destroying = True
+        self.cancel_scan_flag.set()
         self.destroy()
 
 
     def destroy(self):
+        self._is_destroying = True
+        self.cancel_scan_flag.set()
+
+        if hasattr(self, 'scan_thread') and self.scan_thread.is_alive():
+            wait_time = 0.5
+            start_time = time.time()
+            while self._scan_lock.locked() and (time.time() - start_time < wait_time):
+                time.sleep(0.05)
+            self.scan_thread.join(timeout=max(0, wait_time - (time.time() - start_time)))
+
         if self.bucket_fig is not None:
             plt.close(self.bucket_fig)
             self.bucket_fig = None
             self.bucket_ax = None
+
         super().destroy()
