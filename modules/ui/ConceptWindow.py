@@ -92,6 +92,9 @@ class ConceptWindow(ctk.CTkToplevel):
         self.image_preview_file_index = 0
         self.preview_augmentations = ctk.BooleanVar(self, True)
 
+        self.bucket_fig = None
+        self.bucket_ax = None
+
         self.title("Concept")
         self.geometry("800x700")
         self.resizable(True, True)
@@ -514,6 +517,7 @@ class ConceptWindow(ctk.CTkToplevel):
         self.text_color = f"#{int(text_color[0]/256):x}{int(text_color[1]/256):x}{int(text_color[2]/256):x}"
 
         plt.set_loglevel('WARNING')     #suppress errors about data type in bar chart
+
         self.bucket_fig, self.bucket_ax = plt.subplots(figsize=(7,3))
         self.canvas = FigureCanvasTkAgg(self.bucket_fig, master=frame)
         self.canvas.get_tk_widget().grid(row=19, column=0, columnspan=4, rowspan=2)
@@ -923,3 +927,11 @@ class ConceptWindow(ctk.CTkToplevel):
 
     def __ok(self):
         self.destroy()
+
+
+    def destroy(self):
+        if self.bucket_fig is not None:
+            plt.close(self.bucket_fig)
+            self.bucket_fig = None
+            self.bucket_ax = None
+        super().destroy()
