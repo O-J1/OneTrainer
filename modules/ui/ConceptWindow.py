@@ -956,8 +956,6 @@ class ConceptWindow(ctk.CTkToplevel):
         self.destroy()
 
     def __ok(self):
-        self._is_destroying = True
-        self.cancel_scan_flag.set()
         self.destroy()
 
 
