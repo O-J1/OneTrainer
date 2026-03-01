@@ -13,9 +13,9 @@ class SampleFrame(ctk.CTkFrame):
             parent,
             sample: SampleConfig,
             ui_state: UIState,
+            model_type: ModelType,
             include_prompt: bool = True,
             include_settings: bool = True,
-            model_type: ModelType = ModelType.STABLE_DIFFUSION_15,
     ):
         ctk.CTkFrame.__init__(self, parent, fg_color="transparent")
 
