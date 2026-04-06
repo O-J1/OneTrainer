@@ -37,7 +37,9 @@ from modules.util.enum.GradientReducePrecision import GradientReducePrecision
 from modules.util.enum.ImageFormat import ImageFormat
 from modules.util.enum.ModelType import ModelType
 from modules.util.enum.PathIOType import PathIOType
+from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.enum.TrainingMethod import TrainingMethod
+from modules.util.time_util import generate_default_run_name
 from modules.util.torch_util import torch_gc
 from modules.util.TrainProgress import TrainProgress
 from modules.util.ui import components
@@ -138,11 +140,6 @@ class TrainUI(ctk.CTk):
 
         self.workspace_dir_trace_id = self.ui_state.add_var_trace("workspace_dir", self._on_workspace_dir_change_trace)
 
-        self._output_dest_trace_id = self.ui_state.add_var_trace(
-            "output_model_destination", self._sync_run_name_from_output
-        )
-        self._sync_run_name_from_output()
-
         # Persistent profiling window.
         self.profiling_window = ProfilingWindow(self)
 
@@ -153,10 +150,6 @@ class TrainUI(ctk.CTk):
         self._stop_always_on_tensorboard()
         if hasattr(self, 'workspace_dir_trace_id'):
             self.ui_state.remove_var_trace("workspace_dir", self.workspace_dir_trace_id)
-        if hasattr(self, '_output_dest_trace_id'):
-            self.ui_state.remove_var_trace("output_model_destination", self._output_dest_trace_id)
-        if hasattr(self, '_output_run_name_trace_id'):
-            self.ui_state.remove_var_trace("output_name_as_run_name", self._output_run_name_trace_id)
         self.quit()
 
     def top_bar(self, master):
@@ -278,14 +271,6 @@ class TrainUI(ctk.CTk):
                          tooltip="Automatically corrects common input mistakes: trims whitespace, normalises Unicode, fixes decimal notation, cleans path separators, and more")
         components.switch(frame, 3, 3, self.ui_state, "auto_correct_input")
 
-        components.label(frame, 4, 0, "Friendly Run Names",
-                         tooltip="When a model output name is auto-generated (blank field), use human-friendly word pairs instead of timestamps")
-        components.switch(frame, 4, 1, self.ui_state, "friendly_run_names")
-
-        components.label(frame, 4, 2, "Output Name as Run Name",
-                         tooltip="Automatically set the save filename prefix to the stem of the model output path. This syncs backup, save, sample, and tensorboard naming.")
-        components.switch(frame, 4, 3, self.ui_state, "output_name_as_run_name",
-                          command=self._sync_run_name_from_output)
         # debug
         components.label(frame, 5, 0, "Debug mode",
                          tooltip="Save debug information during the training into the debug directory")
@@ -489,32 +474,6 @@ class TrainUI(ctk.CTk):
         components.label(frame, 4, 0, "Skip First",
                          tooltip="Start saving automatically after this interval has elapsed")
         components.entry(frame, 4, 1, self.ui_state, "save_skip_first", width=50, sticky="nw")
-
-        # save filename prefix
-        components.label(frame, 5, 0, "Save Filename Prefix",
-                         tooltip="The prefix for filenames used when saving the model during training")
-        self._save_prefix_entry = components.entry(frame, 5, 1, self.ui_state, "save_filename_prefix")
-
-        self._save_prefix_normal_text_color = self._save_prefix_entry.cget("text_color")
-        self._save_prefix_disabled_text_color = "gray60"
-
-        def _update_prefix_entry_state():
-            disabled = bool(self.train_config.output_name_as_run_name)
-            state = "disabled" if disabled else "normal"
-            self._save_prefix_entry.configure(state=state)
-            if disabled:
-                self._save_prefix_entry.configure(
-                    text_color=self._save_prefix_disabled_text_color
-                )
-            else:
-                self._save_prefix_entry.configure(
-                    text_color=self._save_prefix_normal_text_color
-                )
-
-        self._output_run_name_trace_id = self.ui_state.add_var_trace(
-            "output_name_as_run_name", _update_prefix_entry_state
-        )
-        _update_prefix_entry_state()
 
         frame.pack(fill="both", expand=1)
         return frame
@@ -793,6 +752,14 @@ class TrainUI(ctk.CTk):
             # --- pre-training validation gate ---
             errors = flush_and_validate_all()
 
+            # Auto-fill empty run_name in custom mode with auto-correct enabled
+            if (not self.train_config.run_name
+                    and self.train_config.run_name_mode == RunNameMode.CUSTOM
+                    and self.train_config.auto_correct_input):
+                name = generate_default_run_name(self.train_config.training_method)
+                self.train_config.run_name = name
+                self.ui_state.get_var("run_name").set(name)
+
             if errors:
                 bullet_list = "\n".join(f"• {e}" for e in errors)
                 messagebox.showerror(
@@ -928,16 +895,3 @@ class TrainUI(ctk.CTk):
 
     def _set_training_button_stopping(self):
         self._set_training_button_style("stopping")
-
-    def _sync_run_name_from_output(self, *_args):
-        if not self.train_config.output_name_as_run_name:
-            return
-        dest = self.train_config.output_model_destination or ""
-        if dest.strip():
-            stem = Path(dest).stem
-            prefix = f"{stem}-" if stem else ""
-        else:
-            prefix = ""
-        current_prefix = self.train_config.save_filename_prefix or ""
-        if current_prefix != prefix:
-            self.ui_state.get_var("save_filename_prefix").set(prefix)

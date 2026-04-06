@@ -21,11 +21,11 @@ _INVISIBLE_UNICODE_CHARS_RE = re.compile(
 )
 _CONSECUTIVE_WHITESPACE_RE = re.compile(r"[ \t]+")
 _NUMERIC_SEPARATOR_RE = re.compile(r"[_,\u066b]")
+
 # Match one decimal separator: period, comma, or Arabic momayyez
 _ANY_DECIMAL_RE = re.compile(r"^(-?\d+)[.,\u066b](\d*)$")
 _FOREIGN_DECIMAL_RE = re.compile(r"^(-?\d+)[,\u066b](\d+)$")
 _WINDOWS_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[/\\]")
-_FILE_EXTENSION_SUFFIX_RE = re.compile(r"\.[A-Za-z0-9]+$")
 
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -92,7 +92,6 @@ def autocorrect_float(value: str) -> str:
 def autocorrect_path(
     value: str,
     io_type: PathIOType = PathIOType.INPUT,
-    expected_ext: str | None = None,
 ) -> str:
     if not value:
         return value
@@ -108,18 +107,20 @@ def autocorrect_path(
     if result.startswith("~"):
         result = os.path.expanduser(result)
 
+    was_dot_relative = result.startswith(("./", ".\\"))
+
     if _IS_WINDOWS:
         is_unc = result.startswith(("\\\\", "//"))
         result = os.path.normpath(result.replace("/", "\\"))
         if is_unc and not result.startswith("\\\\"):
             result = "\\\\" + result.lstrip("\\")
     elif not _WINDOWS_DRIVE_PREFIX_RE.match(result):
-        result = os.path.normpath(result)
+        result = os.path.normpath(result) # normpath will modify the forward slashes, correct it below
 
-    if io_type in (PathIOType.OUTPUT, PathIOType.MODEL):
+    if was_dot_relative and not os.path.isabs(result) and not result.startswith(("./", ".\\")) and result != ".":
+        result = "./" + result
+
+    if io_type == PathIOType.OUTPUT:
         result = result.rstrip(os.sep)
-
-    if expected_ext is not None and io_type == PathIOType.MODEL and result:
-        result = _FILE_EXTENSION_SUFFIX_RE.sub("", result) + expected_ext
 
     return result

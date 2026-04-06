@@ -70,7 +70,8 @@ class GenericTrainer(BaseTrainer):
         if multi.is_master():
             tensorboard_log_dir = os.path.join(config.workspace_dir, "tensorboard")
             os.makedirs(Path(tensorboard_log_dir).absolute(), exist_ok=True)
-            self.tensorboard = SummaryWriter(os.path.join(tensorboard_log_dir, f"{config.save_filename_prefix}{get_string_timestamp()}"))
+            run_prefix = f"{config.run_name}-" if config.run_name else ""
+            self.tensorboard = SummaryWriter(os.path.join(tensorboard_log_dir, f"{run_prefix}{get_string_timestamp()}"))
             if config.tensorboard and not config.tensorboard_always_on:
                 super()._start_tensorboard()
 
@@ -164,7 +165,8 @@ class GenericTrainer(BaseTrainer):
     def __save_config_to_workspace(self):
         path = path_util.canonical_join(self.config.workspace_dir, "config")
         os.makedirs(Path(path).absolute(), exist_ok=True)
-        path = path_util.canonical_join(path, f"{self.config.save_filename_prefix}{get_string_timestamp()}.json")
+        run_prefix = f"{self.config.run_name}-" if self.config.run_name else ""
+        path = path_util.canonical_join(path, f"{run_prefix}{get_string_timestamp()}.json")
         with open(path, "w") as f:
             json.dump(self.config.to_pack_dict(secrets=False), f, indent=4)
 
@@ -237,9 +239,10 @@ class GenericTrainer(BaseTrainer):
                         f"{str(i)} - {safe_prompt}{folder_postfix}",
                     )
 
+                run_prefix = f"{self.config.run_name}-" if self.config.run_name else ""
                 sample_path = os.path.join(
                     sample_dir,
-                    f"{self.config.save_filename_prefix}{get_string_timestamp()}-training-sample-{train_progress.filename_string()}"
+                    f"{run_prefix}{get_string_timestamp()}-training-sample-{train_progress.filename_string()}"
                 )
 
                 def on_sample_default(sampler_output: ModelSamplerOutput):
@@ -436,7 +439,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Creating backup")
 
-        safe_prefix = path_util.safe_filename(self.config.save_filename_prefix, max_length=None)
+        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
         backup_name = f"{safe_prefix}{get_string_timestamp()}-backup-{train_progress.filename_string()}"
         backup_path = os.path.join(self.config.workspace_dir, "backup", backup_name)
 
@@ -484,7 +487,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Saving")
 
-        safe_prefix = path_util.safe_filename(self.config.save_filename_prefix, max_length=None)
+        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
         save_path = os.path.join(
             self.config.workspace_dir,
             "save",
@@ -858,13 +861,10 @@ class GenericTrainer(BaseTrainer):
 
                 if self.model.ema:
                     self.model.ema.copy_ema_to(self.parameters, store_temp=False)
-                if os.path.isdir(self.config.output_model_destination) and self.config.output_model_format.is_single_file():
-                    save_path = os.path.join(
-                        self.config.output_model_destination,
-                        f"{self.config.save_filename_prefix}{get_string_timestamp()}{self.config.output_model_format.file_extension()}"
-                    )
-                else:
-                    save_path = self.config.output_model_destination
+                save_path = os.path.join(
+                    self.config.final_output_dir,
+                    f"{self.config.run_name}{self.config.output_model_format.file_extension()}"
+                )
                 print("Saving " + save_path)
 
                 self.model_saver.save(

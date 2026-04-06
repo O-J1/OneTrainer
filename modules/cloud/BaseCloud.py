@@ -26,9 +26,12 @@ class BaseCloud(metaclass=ABCMeta):
             self._make_tensorboard_tunnel()
 
     def download_output_model(self):
-        local=Path(self.config.local_output_model_destination)
-        remote=Path(self.config.output_model_destination)
-        self.file_sync.sync_down_file(local=local,remote=remote)
+        ext = self.config.output_model_format.file_extension()
+        name = f"{self.config.run_name}{ext}"
+        remote = Path(self.config.final_output_dir) / name
+        local_dir = getattr(self.config, "local_final_output_dir", self.config.final_output_dir)
+        local = Path(local_dir) / name
+        self.file_sync.sync_down_file(local=local, remote=remote)
         self.file_sync.sync_down_dir(local=local.with_suffix(local.suffix+"_embeddings"),
                            remote=remote.with_suffix(remote.suffix+"_embeddings"))
 

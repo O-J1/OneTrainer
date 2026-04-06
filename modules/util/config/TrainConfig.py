@@ -25,6 +25,7 @@ from modules.util.enum.LossWeight import LossWeight
 from modules.util.enum.ModelFormat import ModelFormat
 from modules.util.enum.ModelType import ModelType, PeftType
 from modules.util.enum.Optimizer import Optimizer
+from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.enum.TimestepDistribution import TimestepDistribution
 from modules.util.enum.TimeUnit import TimeUnit
 from modules.util.enum.TrainingMethod import TrainingMethod
@@ -372,8 +373,7 @@ class TrainConfig(BaseConfig):
     continue_last_backup: bool
     prevent_overwrites: bool
     auto_correct_input: bool
-    friendly_run_names: bool
-    output_name_as_run_name: bool
+    run_name_mode: RunNameMode
     include_train_config: ConfigPart
 
     # multi-GPU
@@ -386,9 +386,10 @@ class TrainConfig(BaseConfig):
 
     # model settings
     base_model_name: str
+    run_name: str
+    final_output_dir: str
     output_dtype: DataType
     output_model_format: ModelFormat
-    output_model_destination: str
     gradient_checkpointing: GradientCheckpointingMethod
     enable_async_offloading: bool
     enable_activation_offloading: bool
@@ -567,7 +568,6 @@ class TrainConfig(BaseConfig):
     save_every: int
     save_every_unit: TimeUnit
     save_skip_first: int
-    save_filename_prefix: str
 
     # secrets - not saved into config file
     secrets: SecretsConfig
@@ -575,7 +575,7 @@ class TrainConfig(BaseConfig):
     def __init__(self, data: list[(str, Any, type, bool)]):
         super().__init__(
             data,
-            config_version=10,
+            config_version=11,
             config_migrations={
                 0: self.__migration_0,
                 1: self.__migration_1,
@@ -587,6 +587,7 @@ class TrainConfig(BaseConfig):
                 7: self.__migration_7,
                 8: self.__migration_8,
                 9: self.__migration_9,
+                10: self.__migration_10,
             }
         )
 
@@ -806,6 +807,31 @@ class TrainConfig(BaseConfig):
 
         return migrated_data
 
+    def __migration_10(self, data: dict) -> dict:
+        from pathlib import PurePosixPath, PureWindowsPath
+        migrated_data = data.copy()
+
+        dest = migrated_data.pop("output_model_destination", "")
+        old_prefix = migrated_data.pop("save_filename_prefix", "")
+        migrated_data.pop("output_name_as_run_name", None)
+
+        if dest:
+            p = PureWindowsPath(dest) if "\\" in dest else PurePosixPath(dest)
+            run_name = p.stem
+            parent = str(p.parent)
+            final_output_dir = parent if parent != "." else "./models"
+        else:
+            run_name = ""
+            final_output_dir = "./models"
+
+        if old_prefix:
+            run_name = old_prefix.rstrip("-").strip()
+
+        migrated_data["run_name"] = run_name
+        migrated_data["final_output_dir"] = final_output_dir
+
+        return migrated_data
+
     def weight_dtypes(self) -> ModelWeightDtypes:
         return ModelWeightDtypes(
             self.train_dtype,
@@ -982,8 +1008,7 @@ class TrainConfig(BaseConfig):
         data.append(("continue_last_backup", False, bool, False))
         data.append(("prevent_overwrites", False, bool, False))
         data.append(("auto_correct_input", True, bool, False))
-        data.append(("friendly_run_names", False, bool, False))
-        data.append(("output_name_as_run_name", False, bool, False))
+        data.append(("run_name_mode", RunNameMode.DEFAULT, RunNameMode, False))
         data.append(("include_train_config", ConfigPart.NONE, ConfigPart, False))
 
         #multi-GPU
@@ -996,9 +1021,10 @@ class TrainConfig(BaseConfig):
 
         # model settings
         data.append(("base_model_name", "stable-diffusion-v1-5/stable-diffusion-v1-5", str, False))
+        data.append(("run_name", "", str, False))
+        data.append(("final_output_dir", "models", str, False))
         data.append(("output_dtype", DataType.FLOAT_32, DataType, False))
         data.append(("output_model_format", ModelFormat.SAFETENSORS, ModelFormat, False))
-        data.append(("output_model_destination", "models/model.safetensors", str, False))
         data.append(("gradient_checkpointing", GradientCheckpointingMethod.ON, GradientCheckpointingMethod, False))
         data.append(("enable_async_offloading", True, bool, False))
         data.append(("enable_activation_offloading", True, bool, False))
@@ -1218,7 +1244,6 @@ class TrainConfig(BaseConfig):
         data.append(("save_every", 0, int, False))
         data.append(("save_every_unit", TimeUnit.NEVER, TimeUnit, False))
         data.append(("save_skip_first", 0, int, False))
-        data.append(("save_filename_prefix", "", str, False))
 
         # secrets
         secrets = SecretsConfig.default_values()

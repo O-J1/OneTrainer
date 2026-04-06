@@ -151,7 +151,7 @@ def path_entry(
     )
 
     trace_ids = []
-    if io_type in (PathIOType.OUTPUT, PathIOType.MODEL):
+    if io_type == PathIOType.OUTPUT:
         validator = getattr(entry_component, '_validator', None)
         if validator is not None:
             for dep_var_name in ("prevent_overwrites", "output_model_format"):
@@ -160,7 +160,7 @@ def path_entry(
                     tid = dep_var.trace_add("write", lambda *_a: validator.revalidate())
                     trace_ids.append((dep_var, tid))
 
-    use_save_dialog = io_type in (PathIOType.OUTPUT, PathIOType.MODEL)
+    use_save_dialog = io_type == PathIOType.OUTPUT
 
     def __open_dialog():
         # Determine currently selected filename and/or directory

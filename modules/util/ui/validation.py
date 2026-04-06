@@ -8,12 +8,14 @@ import tkinter as tk
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from modules.util.enum.ModelFormat import ModelFormat
 from modules.util.enum.PathIOType import PathIOType
+from modules.util.enum.RunNameMode import RunNameMode
+from modules.util.path_util import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from modules.util.ui.autocorrect import (
     INVALID_PATH_CHARS,
     autocorrect_float,
@@ -44,6 +46,11 @@ HUGGINGFACE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _IS_WINDOWS = sys.platform == "win32"
 
 _MAX_DISPLAY_CHARS = 5
+DEFAULT_MAX_UNDO = 20
+
+_KNOWN_MODEL_EXTENSIONS = frozenset({".safetensors", ".ckpt", ".pt", ".bin"})
+_KNOWN_STRIP_EXTENSIONS = _KNOWN_MODEL_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
+_PATH_SEP_RE = re.compile(r"[/\\]")
 
 
 def _format_char(c: str) -> str:
@@ -108,16 +115,16 @@ def _check_overwrite(path: str, *, is_dir: bool, prevent: bool) -> str | None:
 
     if is_dir:
         if os.path.isdir(abs_path):
-            return "Output folder already exists (overwrite prevented)"
+            return f"Output folder `{abs_path}` already exists (overwrite prevented)"
         if os.path.isfile(abs_path):
-            return "Output path exists as a file, but a folder is required for this input (overwrite prevented)"
-        return "Output path already exists, but is not a folder (overwrite prevented)"
+            return f"Output path `{abs_path}` exists as a file, but a folder is required for this input (overwrite prevented)"
+        return f"Output path `{abs_path}` already exists, but is not a folder (overwrite prevented)"
 
     if os.path.isfile(abs_path):
-        return "Output file already exists (overwrite prevented)"
+        return f"Output file `{abs_path}` already exists (overwrite prevented)"
     if os.path.isdir(abs_path):
-        return "Output path exists as a folder, but a file is required (overwrite prevented)"
-    return "Output path already exists, but is not a file (overwrite prevented)"
+        return f"Output path `{abs_path}` exists as a folder, but a file is required (overwrite prevented)"
+    return f"Output path `{abs_path}` already exists, but is not a file (overwrite prevented)"
 
 
 def validate_path(
@@ -125,7 +132,6 @@ def validate_path(
     io_type: PathIOType = PathIOType.INPUT,
     *,
     prevent_overwrites: bool = False,
-    output_format: str | None = None,
     output_is_dir: bool = False,
 ) -> str | None:
     """Return an error string if *value* is an invalid path, else ``None``."""
@@ -155,33 +161,13 @@ def validate_path(
         if not os.path.exists(os.path.abspath(trimmed)):
             return "Input path does not exist"
 
-    if io_type in (PathIOType.OUTPUT, PathIOType.MODEL):
+    if io_type == PathIOType.OUTPUT:
         if not os.path.isdir(os.path.dirname(os.path.abspath(trimmed))):
             return "Parent folder does not exist"
-
-    if io_type == PathIOType.MODEL and output_format is not None:
-        if output_format == "DIFFUSERS":
-            if ENDS_WITH_EXT.search(trimmed):
-                return "Diffusers output must be a directory path, not a file"
-            return _check_overwrite(trimmed, is_dir=True, prevent=prevent_overwrites)
-
-        try:
-            expected_ext = ModelFormat[output_format].file_extension()
-        except KeyError:
-            expected_ext = ""
-
-        if expected_ext:
-            suffix = (PureWindowsPath(trimmed) if _IS_WINDOWS else PurePosixPath(trimmed)).suffix.lower()
-            if suffix != expected_ext:
-                return f"Extension must be '{expected_ext}' for {output_format} format"
-        return _check_overwrite(trimmed, is_dir=False, prevent=prevent_overwrites)
-
-    if io_type == PathIOType.OUTPUT:
-        return _check_overwrite(trimmed, is_dir=output_is_dir, prevent=prevent_overwrites)
+        if not output_is_dir:
+            return _check_overwrite(trimmed, is_dir=False, prevent=prevent_overwrites)
 
     return None
-
-DEFAULT_MAX_UNDO = 20
 
 
 class UndoHistory:
@@ -569,13 +555,57 @@ class PathValidator(FieldValidator):
         super().__init__(component, var, ui_state, var_name, max_undo=max_undo, extra_validate=extra_validate, required=required)
         self.io_type = io_type
         self.output_is_dir = output_is_dir
-        self._model_blank_timer: DebounceTimer | None = None
+
+    def _autocorrect_value(self, value: str) -> str:
+        if not value:
+            return value
+        return autocorrect_path(value, self.io_type)
+
+    def validate(self, value: str) -> str | None:
+        base_err = super().validate(value)
+        if base_err is not None:
+            return base_err
+        if value == "":
+            return None
+
+        return validate_path(
+            value,
+            io_type=self.io_type,
+            prevent_overwrites=self._get_var_value("prevent_overwrites", False),
+            output_is_dir=self.output_is_dir,
+        )
+
+    def revalidate(self) -> None:
+        if self.component.winfo_exists():
+            self._validate_and_style(self._shadow_var.get())
+
+
+class RunNameValidator(FieldValidator):
+    """Validator for the run_name field.
+
+    Strips known model/image/video extensions, rejects path separators,
+    checks for output-file overwrites, and auto-fills a default name
+    when the field is left blank.
+    """
+
+    def __init__(
+        self,
+        component: ctk.CTkEntry,
+        var: tk.Variable,
+        ui_state: UIState,
+        var_name: str,
+        max_undo: int = DEFAULT_MAX_UNDO,
+        extra_validate: Callable[[str], str | None] | None = None,
+        required: bool = False,
+    ):
+        super().__init__(component, var, ui_state, var_name, max_undo=max_undo, extra_validate=extra_validate, required=required)
+        self._blank_timer: DebounceTimer | None = None
+        self._dep_traces: list[tuple[tk.Variable, str]] = []
 
     def _cancel_debounces(self) -> None:
         super()._cancel_debounces()
-        if self._model_blank_timer is not None:
-            self._model_blank_timer.cancel()
-            self._model_blank_timer = None
+        if self._blank_timer is not None:
+            self._blank_timer.cancel()
 
     def _get_format_ext(self, default: str = ".safetensors") -> str:
         fmt = self._get_var_value("output_model_format")
@@ -592,59 +622,112 @@ class PathValidator(FieldValidator):
     def _autocorrect_value(self, value: str) -> str:
         if not value:
             return value
-        ext = self._get_format_ext("") if self.io_type == PathIOType.MODEL else None
-        return autocorrect_path(value, self.io_type, expected_ext=ext)
+        result = autocorrect_string(value)
+        suffix = PurePosixPath(result).suffix.lower()
+        if suffix in _KNOWN_STRIP_EXTENSIONS:
+            result = result[: -len(suffix)]
+        return result
 
     def validate(self, value: str) -> str | None:
         base_err = super().validate(value)
         if base_err is not None:
             return base_err
-        if value == "":
+        if not value:
             return None
+        if _PATH_SEP_RE.search(value):
+            return "Run name must not contain path separators (/ or \\)"
 
-        return validate_path(
-            value,
-            io_type=self.io_type,
-            prevent_overwrites=self._get_var_value("prevent_overwrites", False),
-            output_format=self._get_var_value("output_model_format"),
-            output_is_dir=self.output_is_dir,
+        suffix = PurePosixPath(value).suffix.lower()
+        if suffix in _KNOWN_STRIP_EXTENSIONS:
+            return "Run name must not end with a file extension"
+
+        ext = self._get_format_ext("")
+        if not ext:
+            return None
+        output_dir = str(self._get_var_value("final_output_dir", ""))
+        if not output_dir:
+            return None
+        return _check_overwrite(
+            os.path.join(output_dir, f"{value}{ext}"),
+            is_dir=False,
+            prevent=self._get_var_value("prevent_overwrites", False),
         )
 
+    def _is_auto_mode(self) -> bool:
+        mode = str(self._get_var_value("run_name_mode", "DEFAULT"))
+        return mode != str(RunNameMode.CUSTOM)
+
     def revalidate(self) -> None:
-        if self.component.winfo_exists():
+        if self._widget_alive():
             self._validate_and_style(self._shadow_var.get())
+
+    def attach(self) -> None:
+        super().attach()
+        self._blank_timer = DebounceTimer(
+            self.component, 10_000, self._fill_default_run_name,
+        )
+        for dep_name in ("final_output_dir", "output_model_format", "prevent_overwrites"):
+            dep_var = self._get_var_safe(dep_name)
+            if dep_var is not None:
+                tid = dep_var.trace_add("write", lambda *_a: self.revalidate())
+                self._dep_traces.append((dep_var, tid))
+        mode_var = self._get_var_safe("run_name_mode")
+        if mode_var is not None:
+            tid = mode_var.trace_add("write", lambda *_a: self._on_mode_change())
+            self._dep_traces.append((mode_var, tid))
+        if self._is_auto_mode():
+            self._generate_run_name()
+
+    def detach(self) -> None:
+        for dep_var, tid in self._dep_traces:
+            with contextlib.suppress(tk.TclError, ValueError):
+                dep_var.trace_remove("write", tid)
+        self._dep_traces.clear()
+        super().detach()
+
+    def _on_focus_out(self, _e=None) -> None:
+        super()._on_focus_out(_e)
+        if (self._touched
+                and not self._is_auto_mode()
+                and self._auto_correct_enabled()
+                and self._shadow_var.get().strip() == ""):
+            self._generate_run_name()
 
     def _on_debounce_fire(self) -> None:
         super()._on_debounce_fire()
-        if self.io_type == PathIOType.MODEL and self._shadow_var.get().strip() == "":
-            self._schedule_model_blank_fill()
+        if (not self._is_auto_mode()
+                and self._auto_correct_enabled()
+                and self._shadow_var.get().strip() == ""):
+            self._schedule_blank_fill()
 
-    def _schedule_model_blank_fill(self) -> None:
-        if self._model_blank_timer is not None:
-            self._model_blank_timer.cancel()
-        self._model_blank_timer = DebounceTimer(
-            self.component, DEBOUNCE_TYPING_MS * 2, self._fill_default_model_name,
-        )
-        self._model_blank_timer.call()
+    def _schedule_blank_fill(self) -> None:
+        self._blank_timer.call()
 
-    def _fill_default_model_name(self) -> None:
-        if self._shadow_var.get().strip():
-            return
+    def _on_mode_change(self) -> None:
+        if self._is_auto_mode():
+            self._generate_run_name()
+        self.revalidate()
 
-        ext = self._get_format_ext()
+    def _generate_run_name(self) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         method = str(self._get_var_value("training_method", "model")).lower().replace(" ", "_")
+        mode = str(self._get_var_value("run_name_mode", "DEFAULT"))
 
-        if self._get_var_value("friendly_run_names", False):
+        if mode == str(RunNameMode.FRIENDLY):
             try:
-                name = fw.generate(2, separator="_")  # type: ignore[attr-defined]
+                name = fw.generate(2, separator="_")
             except Exception:
                 name = f"{method}_{timestamp}"
         else:
             name = f"{method}_{timestamp}"
 
         self._undo.push(self._shadow_var.get())
-        self._set_value(os.path.join("models", f"{name}{ext}"))
+        self._set_value(name)
+
+    def _fill_default_run_name(self) -> None:
+        if self._shadow_var.get().strip():
+            return
+        self._generate_run_name()
 
 
 def flush_and_validate_all() -> list[str]:
