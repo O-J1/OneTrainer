@@ -31,6 +31,7 @@ _WINDOWS_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _IS_WINDOWS = sys.platform == "win32"
 
 INVALID_PATH_CHARS: frozenset[str] = frozenset(chr(c) for c in range(32))
+
 if _IS_WINDOWS:
     INVALID_PATH_CHARS = INVALID_PATH_CHARS | frozenset('<>"|?*')
 

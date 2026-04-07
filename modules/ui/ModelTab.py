@@ -627,18 +627,13 @@ class ModelTab:
         run_name_entry = components.entry(run_name_frame, 0, 1, self.ui_state, "run_name",
                          validator_factory=RunNameValidator, sticky="ew")
 
-        entry_fg_color = run_name_entry.cget("fg_color")
-        entry_text_color = run_name_entry.cget("text_color")
-        disabled_fg = ("gray85", "gray17")
-        disabled_text = ("gray30", "gray70")
-
         def _on_run_name_mode_change(_value=None):
             mode_var = self.ui_state.get_var("run_name_mode")
             mode_str = str(mode_var.get())
             if mode_str == str(RunNameMode.CUSTOM):
-                run_name_entry.configure(state="normal", fg_color=entry_fg_color, text_color=entry_text_color)
+                run_name_entry.set_enabled()
             else:
-                run_name_entry.configure(state="disabled", fg_color=disabled_fg, text_color=disabled_text)
+                run_name_entry.set_disabled()
 
         components.options_kv(run_name_frame, 0, 0, [
             ("Default", RunNameMode.DEFAULT),

@@ -148,7 +148,7 @@ class ValidationTooltip:
             self._hide()
 
     def _show(self):
-        if ValidationTooltip._active_instance is not None and ValidationTooltip._active_instance is not self:
+        if ValidationTooltip._active_instance not in (None, self):
             ValidationTooltip._active_instance._hide()
         ValidationTooltip._active_instance = self
 
@@ -204,7 +204,7 @@ class ValidationTooltip:
                 toplevel.destroy()
 
     def _update_text(self):
-        if self._toplevel is not None and self._label is not None:
+        if self._label is not None:
             with contextlib.suppress(tk.TclError):
                 self._label.configure(text=self.text)
 
@@ -217,11 +217,7 @@ class ValidationTooltip:
         return x, y
 
     def _reposition(self):
-        if self._toplevel is None:
-            return
         x, y = self._calc_position()
-        with contextlib.suppress(tk.TclError):
-            self._toplevel.wm_geometry(f"+{x}+{y}")
 
     def _bind_configure_events(self):
         self._unbind_configure_events()

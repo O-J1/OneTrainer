@@ -51,6 +51,7 @@ DEFAULT_MAX_UNDO = 20
 _KNOWN_MODEL_EXTENSIONS = frozenset({".safetensors", ".ckpt", ".pt", ".bin"})
 _KNOWN_STRIP_EXTENSIONS = _KNOWN_MODEL_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
 _PATH_SEP_RE = re.compile(r"[/\\]")
+_INVALID_RUN_NAME_RE = re.compile(r"[^\w .\-]")
 
 
 def _format_char(c: str) -> str:
@@ -636,6 +637,13 @@ class RunNameValidator(FieldValidator):
             return None
         if _PATH_SEP_RE.search(value):
             return "Run name must not contain path separators (/ or \\)"
+
+        bad = sorted(set(_INVALID_RUN_NAME_RE.findall(value)))
+        if bad:
+            shown = ", ".join(_format_char(c) for c in bad[:_MAX_DISPLAY_CHARS])
+            if len(bad) > _MAX_DISPLAY_CHARS:
+                shown += f" and {len(bad) - _MAX_DISPLAY_CHARS} more"
+            return f"Run name contains invalid characters: {shown}"
 
         suffix = PurePosixPath(value).suffix.lower()
         if suffix in _KNOWN_STRIP_EXTENSIONS:

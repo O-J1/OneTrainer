@@ -194,11 +194,11 @@ class GenericTrainer(BaseTrainer):
             )
 
             for name in backup_directories[backups_to_keep:]:
-                full = os.path.join(backup_dirpath, name)
+                full_path = os.path.join(backup_dirpath, name)
                 try:
-                    shutil.rmtree(full)
+                    shutil.rmtree(full_path)
                 except Exception:
-                    print(f"Could not delete old rolling backup {full}")
+                    print(f"Could not delete old rolling backup {full_path}")
 
         return
 

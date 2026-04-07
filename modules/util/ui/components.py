@@ -85,6 +85,23 @@ def entry(
     validator.attach()
     component._validator = validator  # type: ignore[attr-defined]
 
+    _disabled_fg = ("gray85", "gray17")
+    _disabled_text = ("gray30", "gray70")
+    _saved_colors: dict = {}
+
+    def _set_disabled():
+        _saved_colors["fg_color"] = component.cget("fg_color")
+        _saved_colors["text_color"] = component.cget("text_color")
+        component.configure(state="disabled", fg_color=_disabled_fg, text_color=_disabled_text)
+
+    def _set_enabled():
+        fg = _saved_colors.get("fg_color", ctk.ThemeManager.theme["CTkEntry"]["fg_color"])
+        tc = _saved_colors.get("text_color", ctk.ThemeManager.theme["CTkEntry"]["text_color"])
+        component.configure(state="normal", fg_color=fg, text_color=tc)
+
+    component.set_disabled = _set_disabled  # type: ignore[attr-defined]
+    component.set_enabled = _set_enabled  # type: ignore[attr-defined]
+
     original_destroy = component.destroy
 
     def new_destroy():
