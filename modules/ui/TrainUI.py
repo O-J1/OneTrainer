@@ -243,12 +243,12 @@ class TrainUI(ctk.CTk):
         # workspace dir
         components.label(frame, 0, 0, "Workspace Directory",
                          tooltip="The directory where all files of this training run are saved")
-        components.path_entry(frame, 0, 1, self.ui_state, "workspace_dir", mode="dir", command=self._on_workspace_dir_change)
+        components.path_entry(frame, 0, 1, self.ui_state, "workspace_dir", mode="dir", command=self._on_workspace_dir_change, io_type=PathIOType.OUTPUT)
 
         # cache dir
         components.label(frame, 0, 2, "Cache Directory",
                          tooltip="The directory where cached data is saved")
-        components.path_entry(frame, 0, 3, self.ui_state, "cache_dir", mode="dir")
+        components.path_entry(frame, 0, 3, self.ui_state, "cache_dir", mode="dir", io_type=PathIOType.OUTPUT)
 
         # continue from previous backup
         components.label(frame, 2, 0, "Continue from last backup",
