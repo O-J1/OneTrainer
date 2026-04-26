@@ -1,9 +1,7 @@
 import json
 import os
-import re
 import uuid
 from copy import deepcopy
-from datetime import datetime
 from typing import Any
 
 from modules.util.config.BaseConfig import BaseConfig
@@ -910,39 +908,68 @@ class TrainConfig(BaseConfig):
         else:
             return self.additional_embeddings
 
-    @staticmethod
-    def _extract_backup_datetime(full_path: str, name: str) -> datetime:
-        """Get timestamp from a backup so that run-name prefixing doesn't break backup ordering"""
-
-        m = re.search(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})", name)
-        if m:
-            try:
-                return datetime.strptime(m.group(1), "%Y-%m-%d_%H-%M-%S")
-            except ValueError:
-                pass
-        try:
-            stat = os.stat(full_path)
-            birth = getattr(stat, "st_birthtime", None) or stat.st_ctime or stat.st_mtime
-            return datetime.fromtimestamp(birth)
-        except OSError:
-            return datetime.min
-
-    def get_last_backup_path(self) -> str | None:
+    def get_backup_paths(self) -> list[str]:
         backups_path = os.path.join(self.workspace_dir, "backup")
-        if os.path.exists(backups_path):
-            backup_dirs = [
-                name for name in os.listdir(backups_path)
-                if os.path.isdir(os.path.join(backups_path, name))
-            ]
+        if not os.path.exists(backups_path):
+            return []
 
-            if backup_dirs:
-                last = max(
-                    backup_dirs,
-                    key=lambda n: self._extract_backup_datetime(
-                        os.path.join(backups_path, n), n
-                    ),
-                )
-                return os.path.join(backups_path, last)
+        backup_paths = [
+            os.path.join(backups_path, path)
+            for path in os.listdir(backups_path)
+            if os.path.isdir(os.path.join(backups_path, path))
+        ]
+        backup_paths.sort(key=lambda path: (os.path.getmtime(path), path), reverse=True)
+
+        return backup_paths
+
+    def _load_backup_settings(self, backup_path: str) -> dict[str, Any] | None:
+        args_path = os.path.join(backup_path, "onetrainer_config", "args.json")
+        if not os.path.isfile(args_path):
+            return None
+
+        try:
+            with open(args_path, 'r') as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _backup_is_compatible(self, backup_path: str) -> bool:
+        backup_settings = self._load_backup_settings(backup_path)
+        if backup_settings is None:
+            return False
+
+        if backup_settings.get("training_method") != str(self.training_method):
+            return False
+
+        if self.training_method == TrainingMethod.LORA:
+            return backup_settings.get("peft_type") == str(self.peft_type)
+
+        return True
+
+    def _last_backup_path_error_message(self, backup_paths: list[str]) -> str:
+        mode = f"training_method={self.training_method}"
+        if self.training_method == TrainingMethod.LORA:
+            mode += f", peft_type={self.peft_type}"
+
+        if not backup_paths:
+            return (
+                "Continue from latest backup is enabled, but no backups were found in "
+                f"'{os.path.join(self.workspace_dir, 'backup')}' for {mode}."
+            )
+
+        return (
+            "Continue from latest backup is enabled, but no compatible backup was found in "
+            f"'{os.path.join(self.workspace_dir, 'backup')}' for {mode}."
+        )
+
+    def get_last_backup_path(self, require_compatible: bool = False) -> str | None:
+        backup_paths = self.get_backup_paths()
+        for backup_path in backup_paths:
+            if self._backup_is_compatible(backup_path):
+                return backup_path
+
+        if require_compatible:
+            raise ValueError(self._last_backup_path_error_message(backup_paths))
 
         return None
 

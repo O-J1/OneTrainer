@@ -27,6 +27,7 @@ from modules.util.enum.ConceptType import ConceptType
 from modules.util.enum.EMAMode import EMAMode
 from modules.util.enum.FileType import FileType
 from modules.util.enum.ModelFormat import ModelFormat
+from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.enum.TimeUnit import TimeUnit
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.profiling_util import TorchMemoryRecorder, TorchProfiler
@@ -99,19 +100,18 @@ class GenericTrainer(BaseTrainer):
 
         if self.config.continue_last_backup:
             self.callbacks.on_update_status("searching for previous backups")
-            last_backup_path = self.config.get_last_backup_path()
+            last_backup_path = self.config.get_last_backup_path(require_compatible=True)
+            assert last_backup_path is not None
 
-            if last_backup_path:
-                if self.config.training_method == TrainingMethod.LORA:
-                    model_names.lora = last_backup_path
-                elif self.config.training_method == TrainingMethod.EMBEDDING:
-                    model_names.embedding.model_name = last_backup_path
-                else:  # fine-tunes
-                    model_names.base_model = last_backup_path
-
-                print(f"Continuing training from backup '{last_backup_path}'...")
+            if self.config.training_method == TrainingMethod.LORA:
+                model_names.lora = last_backup_path
+            elif self.config.training_method == TrainingMethod.EMBEDDING:
+                assert model_names.embedding is not None
+                model_names.embedding.model_name = last_backup_path
             else:
-                print("No backup found, continuing without backup...")
+                model_names.base_model = last_backup_path
+
+            print(f"Continuing training from backup '{last_backup_path}'...")
 
         if self.config.secrets.huggingface_token != "":
             self.callbacks.on_update_status("logging into Hugging Face")
@@ -181,24 +181,30 @@ class GenericTrainer(BaseTrainer):
                 if os.path.isdir(path) and (filename.startswith('epoch-') or filename in ['image', 'text']):
                     shutil.rmtree(path)
 
-    def __prune_backups(self, backups_to_keep: int):
-        backup_dirpath = os.path.join(self.config.workspace_dir, "backup")
-        if os.path.exists(backup_dirpath):
-            backup_directories = sorted(
-                [name for name in os.listdir(backup_dirpath) if
-                 os.path.isdir(os.path.join(backup_dirpath, name))],
-                key=lambda n: TrainConfig._extract_backup_datetime(
-                    os.path.join(backup_dirpath, n), n
-                ),
-                reverse=True,
-            )
+    def __get_artifact_prefix(self, safe_filename: bool = False) -> str:
+        if self.config.run_name_mode == RunNameMode.DEFAULT:
+            prefix = f"{str(self.config.training_method).lower().replace(' ', '_')}_"
+        elif self.config.run_name:
+            prefix = f"{self.config.run_name}-"
+        else:
+            prefix = ""
 
-            for name in backup_directories[backups_to_keep:]:
-                full_path = os.path.join(backup_dirpath, name)
-                try:
-                    shutil.rmtree(full_path)
-                except Exception:
-                    print(f"Could not delete old rolling backup {full_path}")
+        if safe_filename and prefix:
+            return path_util.safe_filename(prefix, max_length=None)
+
+        return prefix
+
+    def __delete_backup_directory(self, dirpath: str):
+        try:
+            shutil.rmtree(dirpath)
+        except OSError:
+            print(f"Could not delete old rolling backup {dirpath}")
+
+    def __prune_backups(self, backups_to_keep: int):
+        backup_directories = self.config.get_backup_paths()
+
+        for dirpath in backup_directories[backups_to_keep:]:
+            self.__delete_backup_directory(dirpath)
 
         return
 
@@ -239,7 +245,7 @@ class GenericTrainer(BaseTrainer):
                         f"{str(i)} - {safe_prompt}{folder_postfix}",
                     )
 
-                run_prefix = f"{self.config.run_name}-" if self.config.run_name else ""
+                run_prefix = self.__get_artifact_prefix()
                 sample_path = os.path.join(
                     sample_dir,
                     f"{run_prefix}{get_string_timestamp()}-training-sample-{train_progress.filename_string()}"
@@ -439,7 +445,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Creating backup")
 
-        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
+        safe_prefix = self.__get_artifact_prefix(safe_filename=True)
         backup_name = f"{safe_prefix}{get_string_timestamp()}-backup-{train_progress.filename_string()}"
         backup_path = os.path.join(self.config.workspace_dir, "backup", backup_name)
 
@@ -487,7 +493,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Saving")
 
-        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
+        safe_prefix = self.__get_artifact_prefix(safe_filename=True)
         save_path = os.path.join(
             self.config.workspace_dir,
             "save",
