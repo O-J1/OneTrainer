@@ -1,6 +1,6 @@
 
 from modules.util import create
-from modules.util.config.TrainConfig import TrainConfig
+from modules.util.config.TrainConfig import TrainConfig, is_auto_run_name_mode
 from modules.util.enum.ConfigPart import ConfigPart
 from modules.util.enum.DataType import DataType
 from modules.util.enum.ModelFormat import ModelFormat
@@ -629,11 +629,10 @@ class ModelTab:
 
         def _on_run_name_mode_change(_value=None):
             mode_var = self.ui_state.get_var("run_name_mode")
-            mode_str = str(mode_var.get())
-            if mode_str == str(RunNameMode.CUSTOM):
-                run_name_entry.set_enabled()
-            else:
+            if is_auto_run_name_mode(mode_var.get()):
                 run_name_entry.set_disabled()
+            else:
+                run_name_entry.set_enabled()
 
         components.options_kv(run_name_frame, 0, 0, [
             ("Default", RunNameMode.DEFAULT),

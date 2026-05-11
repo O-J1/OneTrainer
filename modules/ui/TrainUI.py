@@ -31,15 +31,13 @@ from modules.ui.VideoToolUI import VideoToolUI
 from modules.util import create
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
-from modules.util.config.TrainConfig import TrainConfig
+from modules.util.config.TrainConfig import TrainConfig, prepare_run_name
 from modules.util.enum.DataType import DataType
 from modules.util.enum.GradientReducePrecision import GradientReducePrecision
 from modules.util.enum.ImageFormat import ImageFormat
 from modules.util.enum.ModelType import ModelType
 from modules.util.enum.PathIOType import PathIOType
-from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.enum.TrainingMethod import TrainingMethod
-from modules.util.time_util import generate_default_run_name
 from modules.util.torch_util import torch_gc
 from modules.util.TrainProgress import TrainProgress
 from modules.util.ui import components
@@ -739,8 +737,22 @@ class TrainUI(ctk.CTk):
             self.on_update_status("Stopped")
         self.delete_eta_label()
 
-        # queue UI update on Tk main thread; _set_training_button_idle applies shared styles, avoid potential race/crash
-        self.after(0, self._set_training_button_idle)
+        self.after(0, self._on_training_stopped)
+
+    def _sync_run_name(self, *, is_new_invocation: bool):
+        name = prepare_run_name(
+            self.train_config.training_method,
+            self.train_config.run_name_mode,
+            self.train_config.run_name,
+            is_new_invocation=is_new_invocation,
+        )
+        self.train_config.run_name = name
+        self.ui_state.get_var("run_name").set(name)
+
+    def _on_training_stopped(self):
+        # _set_training_button_idle applies shared styles on the Tk main thread.
+        self._set_training_button_idle()
+        self._sync_run_name(is_new_invocation=True)
 
         if self.train_config.tensorboard_always_on and not self.always_on_tensorboard_subprocess:
             self.after(0, self._start_always_on_tensorboard)
@@ -749,16 +761,10 @@ class TrainUI(ctk.CTk):
         if self.training_thread is None:
             self.save_default()
 
+            self._sync_run_name(is_new_invocation=False)
+
             # --- pre-training validation gate ---
             errors = flush_and_validate_all()
-
-            # Auto-fill empty run_name in custom mode with auto-correct enabled
-            if (not self.train_config.run_name
-                    and self.train_config.run_name_mode == RunNameMode.CUSTOM
-                    and self.train_config.auto_correct_input):
-                name = generate_default_run_name(self.train_config.training_method)
-                self.train_config.run_name = name
-                self.ui_state.get_var("run_name").set(name)
 
             if errors:
                 bullet_list = "\n".join(f"• {e}" for e in errors)
@@ -767,6 +773,16 @@ class TrainUI(ctk.CTk):
                     f"Please fix the following errors before training:\n\n{bullet_list}",
                 )
                 return
+
+            if self.train_config.continue_last_backup:
+                try:
+                    self.train_config.get_last_backup_path(
+                        require_compatible=True,
+                        require_remaining_work=True,
+                    )
+                except ValueError as e:
+                    messagebox.showerror("Cannot Start Training", str(e))
+                    return
 
             self._set_training_button_running()
 

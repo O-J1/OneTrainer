@@ -21,13 +21,12 @@ from modules.util.bf16_stochastic_rounding import set_seed as bf16_stochastic_ro
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
 from modules.util.config.SampleConfig import SampleConfig
-from modules.util.config.TrainConfig import TrainConfig
+from modules.util.config.TrainConfig import TrainConfig, get_output_model_destination
 from modules.util.dtype_util import create_grad_scaler, enable_grad_scaling
 from modules.util.enum.ConceptType import ConceptType
 from modules.util.enum.EMAMode import EMAMode
 from modules.util.enum.FileType import FileType
 from modules.util.enum.ModelFormat import ModelFormat
-from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.enum.TimeUnit import TimeUnit
 from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.profiling_util import TorchMemoryRecorder, TorchProfiler
@@ -100,8 +99,12 @@ class GenericTrainer(BaseTrainer):
 
         if self.config.continue_last_backup:
             self.callbacks.on_update_status("searching for previous backups")
-            last_backup_path = self.config.get_last_backup_path(require_compatible=True)
-            assert last_backup_path is not None
+            last_backup_path = self.config.get_last_backup_path(
+                require_compatible=True,
+                require_remaining_work=True,
+            )
+            if last_backup_path is None:
+                raise ValueError("Continue from latest backup is enabled, but no compatible backup was found.")
 
             if self.config.training_method == TrainingMethod.LORA:
                 model_names.lora = last_backup_path
@@ -181,19 +184,6 @@ class GenericTrainer(BaseTrainer):
                 if os.path.isdir(path) and (filename.startswith('epoch-') or filename in ['image', 'text']):
                     shutil.rmtree(path)
 
-    def __get_artifact_prefix(self, safe_filename: bool = False) -> str:
-        if self.config.run_name_mode == RunNameMode.DEFAULT:
-            prefix = f"{str(self.config.training_method).lower().replace(' ', '_')}_"
-        elif self.config.run_name:
-            prefix = f"{self.config.run_name}-"
-        else:
-            prefix = ""
-
-        if safe_filename and prefix:
-            return path_util.safe_filename(prefix, max_length=None)
-
-        return prefix
-
     def __delete_backup_directory(self, dirpath: str):
         try:
             shutil.rmtree(dirpath)
@@ -245,7 +235,7 @@ class GenericTrainer(BaseTrainer):
                         f"{str(i)} - {safe_prompt}{folder_postfix}",
                     )
 
-                run_prefix = self.__get_artifact_prefix()
+                run_prefix = f"{self.config.run_name}-" if self.config.run_name else ""
                 sample_path = os.path.join(
                     sample_dir,
                     f"{run_prefix}{get_string_timestamp()}-training-sample-{train_progress.filename_string()}"
@@ -445,7 +435,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Creating backup")
 
-        safe_prefix = self.__get_artifact_prefix(safe_filename=True)
+        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
         backup_name = f"{safe_prefix}{get_string_timestamp()}-backup-{train_progress.filename_string()}"
         backup_path = os.path.join(self.config.workspace_dir, "backup", backup_name)
 
@@ -493,7 +483,7 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("Saving")
 
-        safe_prefix = self.__get_artifact_prefix(safe_filename=True)
+        safe_prefix = path_util.safe_filename(f"{self.config.run_name}-", max_length=None) if self.config.run_name else ""
         save_path = os.path.join(
             self.config.workspace_dir,
             "save",
@@ -867,9 +857,10 @@ class GenericTrainer(BaseTrainer):
 
                 if self.model.ema:
                     self.model.ema.copy_ema_to(self.parameters, store_temp=False)
-                save_path = os.path.join(
+                save_path = get_output_model_destination(
                     self.config.final_output_dir,
-                    f"{self.config.run_name}{self.config.output_model_format.file_extension()}"
+                    self.config.run_name,
+                    self.config.output_model_format,
                 )
                 print("Saving " + save_path)
 

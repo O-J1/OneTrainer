@@ -10,8 +10,6 @@ from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
 from modules.util.config.SecretsConfig import SecretsConfig
 from modules.util.config.TrainConfig import TrainConfig
-from modules.util.enum.RunNameMode import RunNameMode
-from modules.util.time_util import generate_default_run_name
 
 
 def main():
@@ -30,11 +28,6 @@ def main():
     except FileNotFoundError:
         if args.secrets_path is not None:
             raise
-
-    if (not train_config.run_name
-            and str(train_config.run_name_mode) == str(RunNameMode.CUSTOM)
-            and train_config.auto_correct_input):
-        train_config.run_name = generate_default_run_name(train_config.training_method)
 
     trainer = create.create_trainer(train_config, callbacks, commands)
 

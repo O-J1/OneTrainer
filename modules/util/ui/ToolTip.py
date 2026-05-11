@@ -218,6 +218,9 @@ class ValidationTooltip:
 
     def _reposition(self):
         x, y = self._calc_position()
+        if self._toplevel is not None:
+            with contextlib.suppress(tk.TclError):
+                self._toplevel.wm_geometry(f"+{x}+{y}")
 
     def _bind_configure_events(self):
         self._unbind_configure_events()

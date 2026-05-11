@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from copy import deepcopy
 from typing import Any
@@ -30,7 +31,52 @@ from modules.util.enum.TrainingMethod import TrainingMethod
 from modules.util.enum.VideoFormat import VideoFormat
 from modules.util.ModelNames import EmbeddingName, ModelNames
 from modules.util.ModelWeightDtypes import ModelWeightDtypes
+from modules.util.time_util import get_string_timestamp
 from modules.util.torch_util import default_device
+from modules.util.TrainProgress import TrainProgress
+
+import friendlywords
+
+BACKUP_NAME_TIMESTAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})$")
+
+
+def generate_run_name(training_method, run_name_mode: RunNameMode = RunNameMode.DEFAULT) -> str:
+    mode = str(run_name_mode)
+
+    if mode == str(RunNameMode.FRIENDLY):
+        return friendlywords.generate(2, separator="_")
+
+    method = str(training_method).lower().replace(" ", "_")
+    return f"{method}_{get_string_timestamp()}"
+
+
+def is_auto_run_name_mode(run_name_mode: RunNameMode | str | None) -> bool:
+    return str(run_name_mode or RunNameMode.DEFAULT) != str(RunNameMode.CUSTOM)
+
+
+def prepare_run_name(
+    training_method,
+    run_name_mode: RunNameMode = RunNameMode.DEFAULT,
+    current_run_name: str | None = None,
+    *,
+    is_new_invocation: bool = False,
+) -> str:
+    """Choose the run name to use now, reusing an existing one when allowed and regenerating auto names for a new run."""
+    if is_new_invocation and is_auto_run_name_mode(run_name_mode):
+        return generate_run_name(training_method, run_name_mode)
+
+    if (current_run_name or "").strip():
+        return current_run_name or ""
+
+    return generate_run_name(training_method, run_name_mode)
+
+def get_output_model_destination(
+    final_output_dir: str,
+    run_name: str,
+    output_model_format: ModelFormat,
+) -> str:
+    """Build the path for final model output (non workspace ones)"""
+    return os.path.join(final_output_dir, f"{run_name}{output_model_format.file_extension()}")
 
 
 class TrainOptimizerConfig(BaseConfig):
@@ -908,6 +954,21 @@ class TrainConfig(BaseConfig):
         else:
             return self.additional_embeddings
 
+    def _backup_sort_key(self, backup_path: str) -> tuple[str, int, int, int, str]:
+        """Sort by the backup name's embedded timestamp/progress (not mtime), so copied backups and prefixes dont change which backup is considered latest."""
+        backup_name = os.path.basename(backup_path)
+        prefix_and_timestamp, separator, progress_suffix = backup_name.rpartition("-backup-")
+
+        if separator:
+            timestamp_match = BACKUP_NAME_TIMESTAMP_RE.search(prefix_and_timestamp)
+            progress_parts = progress_suffix.split("-")
+
+            if timestamp_match and len(progress_parts) == 3 and all(part.isdigit() for part in progress_parts):
+                global_step, epoch, epoch_step = (int(part) for part in progress_parts)
+                return (timestamp_match.group(1), global_step, epoch, epoch_step, backup_name)
+
+        return ("", -1, -1, -1, backup_name)
+
     def get_backup_paths(self) -> list[str]:
         backups_path = os.path.join(self.workspace_dir, "backup")
         if not os.path.exists(backups_path):
@@ -918,24 +979,44 @@ class TrainConfig(BaseConfig):
             for path in os.listdir(backups_path)
             if os.path.isdir(os.path.join(backups_path, path))
         ]
-        backup_paths.sort(key=lambda path: (os.path.getmtime(path), path), reverse=True)
+        backup_paths.sort(key=self._backup_sort_key, reverse=True)
 
         return backup_paths
 
-    def _load_backup_settings(self, backup_path: str) -> dict[str, Any] | None:
-        args_path = os.path.join(backup_path, "onetrainer_config", "args.json")
-        if not os.path.isfile(args_path):
+    def _load_backup_train_progress(self, backup_path: str) -> TrainProgress | None:
+        meta_path = os.path.join(backup_path, "meta.json")
+        if not os.path.isfile(meta_path):
             return None
 
         try:
-            with open(args_path, 'r') as f:
-                return json.load(f)
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _backup_is_compatible(self, backup_path: str) -> bool:
-        backup_settings = self._load_backup_settings(backup_path)
-        if backup_settings is None:
+        train_progress = meta.get("train_progress")
+        if not isinstance(train_progress, dict):
+            return None
+
+        try:
+            return TrainProgress(
+                epoch=int(train_progress["epoch"]),
+                epoch_step=int(train_progress["epoch_step"]),
+                epoch_sample=int(train_progress["epoch_sample"]),
+                global_step=int(train_progress["global_step"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _backup_training_method_is_compatible(self, backup_path: str) -> bool:
+        args_path = os.path.join(backup_path, "onetrainer_config", "args.json")
+        if not os.path.isfile(args_path):
+            return False
+
+        try:
+            with open(args_path, 'r') as f:
+                backup_settings = json.load(f)
+        except (OSError, json.JSONDecodeError):
             return False
 
         if backup_settings.get("training_method") != str(self.training_method):
@@ -962,11 +1043,29 @@ class TrainConfig(BaseConfig):
             f"'{os.path.join(self.workspace_dir, 'backup')}' for {mode}."
         )
 
-    def get_last_backup_path(self, require_compatible: bool = False) -> str | None:
+    def _last_backup_complete_error_message(self, backup_path: str, train_progress: TrainProgress) -> str:
+        return (
+            "Continue from latest backup is enabled, but the latest compatible backup "
+            f"'{backup_path}' has already reached epoch {train_progress.epoch}. "
+            "Increase your total epochs to continue."
+        )
+
+    def get_last_backup_path(
+        self,
+        require_compatible: bool = False,
+        require_remaining_work: bool = False,
+    ) -> str | None:
         backup_paths = self.get_backup_paths()
         for backup_path in backup_paths:
-            if self._backup_is_compatible(backup_path):
-                return backup_path
+            if not self._backup_training_method_is_compatible(backup_path):
+                continue
+
+            if require_remaining_work:
+                train_progress = self._load_backup_train_progress(backup_path)
+                if train_progress is not None and train_progress.epoch >= self.epochs:
+                    raise ValueError(self._last_backup_complete_error_message(backup_path, train_progress))
+
+            return backup_path
 
         if require_compatible:
             raise ValueError(self._last_backup_path_error_message(backup_paths))

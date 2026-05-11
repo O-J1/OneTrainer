@@ -7,14 +7,13 @@ import sys
 import tkinter as tk
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from modules.util.config.TrainConfig import get_output_model_destination, is_auto_run_name_mode, prepare_run_name
 from modules.util.enum.ModelFormat import ModelFormat
 from modules.util.enum.PathIOType import PathIOType
-from modules.util.enum.RunNameMode import RunNameMode
 from modules.util.path_util import SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from modules.util.ui.autocorrect import (
     INVALID_PATH_CHARS,
@@ -24,8 +23,6 @@ from modules.util.ui.autocorrect import (
     autocorrect_string,
 )
 from modules.util.ui.ToolTip import ValidationTooltip
-
-import friendlywords as fw
 
 if TYPE_CHECKING:
     from modules.util.ui.UIState import UIState
@@ -370,9 +367,9 @@ class FieldValidator:
 
     def _swap_textvariable(self, new_var: tk.Variable) -> None:
         comp = self.component
-        if comp._textvariable_callback_name:
+        if comp._textvariable is not None and comp._textvariable_callback_name:
             with contextlib.suppress(Exception):
-                comp._textvariable.trace_remove("write", comp._textvariable_callback_name)  # type: ignore[union-attr]
+                comp._textvariable.trace_remove("write", comp._textvariable_callback_name)
             comp._textvariable_callback_name = ""
 
         comp.configure(textvariable=new_var)
@@ -585,8 +582,8 @@ class RunNameValidator(FieldValidator):
     """Validator for the run_name field.
 
     Strips known model/image/video extensions, rejects path separators,
-    checks for output-file overwrites, and auto-fills a default name
-    when the field is left blank.
+    checks for output-file overwrites, and applies generated names
+    when the UI mode or fallback rules require them.
     """
 
     def __init__(
@@ -608,17 +605,15 @@ class RunNameValidator(FieldValidator):
         if self._blank_timer is not None:
             self._blank_timer.cancel()
 
-    def _get_format_ext(self, default: str = ".safetensors") -> str:
+    def _get_output_model_format(self) -> ModelFormat:
         fmt = self._get_var_value("output_model_format")
         if fmt is None:
-            return default
+            return ModelFormat.SAFETENSORS
         fmt_str = str(fmt)
-        if fmt_str == "DIFFUSERS":
-            return ""
         try:
-            return ModelFormat[fmt_str].file_extension()
+            return ModelFormat[fmt_str]
         except KeyError:
-            return default
+            return ModelFormat.SAFETENSORS
 
     def _autocorrect_value(self, value: str) -> str:
         if not value:
@@ -649,21 +644,18 @@ class RunNameValidator(FieldValidator):
         if suffix in _KNOWN_STRIP_EXTENSIONS:
             return "Run name must not end with a file extension"
 
-        ext = self._get_format_ext("")
-        if not ext:
-            return None
         output_dir = str(self._get_var_value("final_output_dir", ""))
         if not output_dir:
             return None
+        output_model_format = self._get_output_model_format()
         return _check_overwrite(
-            os.path.join(output_dir, f"{value}{ext}"),
-            is_dir=False,
+            get_output_model_destination(output_dir, value, output_model_format),
+            is_dir=not output_model_format.is_single_file(),
             prevent=self._get_var_value("prevent_overwrites", False),
         )
 
     def _is_auto_mode(self) -> bool:
-        mode = str(self._get_var_value("run_name_mode", "DEFAULT"))
-        return mode != str(RunNameMode.CUSTOM)
+        return is_auto_run_name_mode(self._get_var_value("run_name_mode", "DEFAULT"))
 
     def revalidate(self) -> None:
         if self._widget_alive():
@@ -684,7 +676,7 @@ class RunNameValidator(FieldValidator):
             tid = mode_var.trace_add("write", lambda *_a: self._on_mode_change())
             self._dep_traces.append((mode_var, tid))
         if self._is_auto_mode():
-            self._generate_run_name()
+            self._apply_prepared_run_name(is_new_invocation=True)
 
     def detach(self) -> None:
         for dep_var, tid in self._dep_traces:
@@ -697,37 +689,32 @@ class RunNameValidator(FieldValidator):
         super()._on_focus_out(_e)
         if (self._touched
                 and not self._is_auto_mode()
-                and self._auto_correct_enabled()
                 and self._shadow_var.get().strip() == ""):
-            self._generate_run_name()
+            self._apply_prepared_run_name(is_new_invocation=False)
 
     def _on_debounce_fire(self) -> None:
         super()._on_debounce_fire()
         if (not self._is_auto_mode()
-                and self._auto_correct_enabled()
                 and self._shadow_var.get().strip() == ""):
             self._schedule_blank_fill()
 
     def _schedule_blank_fill(self) -> None:
-        self._blank_timer.call()
+        if self._blank_timer is not None:
+            self._blank_timer.call()
 
     def _on_mode_change(self) -> None:
         if self._is_auto_mode():
-            self._generate_run_name()
+            self._apply_prepared_run_name(is_new_invocation=True)
         self.revalidate()
 
-    def _generate_run_name(self) -> None:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        method = str(self._get_var_value("training_method", "model")).lower().replace(" ", "_")
-        mode = str(self._get_var_value("run_name_mode", "DEFAULT"))
-
-        if mode == str(RunNameMode.FRIENDLY):
-            try:
-                name = fw.generate(2, separator="_")
-            except Exception:
-                name = f"{method}_{timestamp}"
-        else:
-            name = f"{method}_{timestamp}"
+    def _apply_prepared_run_name(self, *, is_new_invocation: bool) -> None:
+        current_name = self._shadow_var.get()
+        name = prepare_run_name(
+            self._get_var_value("training_method", "model"),
+            self._get_var_value("run_name_mode", "DEFAULT"),
+            current_name,
+            is_new_invocation=is_new_invocation,
+        )
 
         self._undo.push(self._shadow_var.get())
         self._set_value(name)
@@ -735,7 +722,7 @@ class RunNameValidator(FieldValidator):
     def _fill_default_run_name(self) -> None:
         if self._shadow_var.get().strip():
             return
-        self._generate_run_name()
+        self._apply_prepared_run_name(is_new_invocation=False)
 
 
 def flush_and_validate_all() -> list[str]:
