@@ -476,11 +476,6 @@ class TrainUI(ctk.CTk):
                          tooltip="Start saving automatically after this interval has elapsed")
         components.entry(frame, 5, 1, self.ui_state, "save_skip_first", width=50, sticky="nw")
 
-        # save filename prefix
-        components.label(frame, 6, 0, "Save Filename Prefix",
-                         tooltip="The prefix for filenames used when saving the model during training")
-        components.entry(frame, 6, 1, self.ui_state, "save_filename_prefix")
-
         frame.pack(fill="both", expand=1)
         return frame
 
