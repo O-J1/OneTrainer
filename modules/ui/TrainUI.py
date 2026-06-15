@@ -319,9 +319,9 @@ class TrainUI(ctk.CTk):
                          tooltip="Enable multi-GPU training")
         components.switch(frame, 12, 1, self.ui_state, "multi_gpu")
 
-        components.label(frame, 13, 2, "Device Indexes",
+        components.label(frame, 12, 2, "Device Indexes",
                          tooltip="Multi-GPU: A comma-separated list of device indexes. If empty, all your GPUs are used. With a list such as \"0,1,3,4\" you can omit a GPU, for example an on-board graphics GPU.")
-        components.entry(frame, 13, 3, self.ui_state, "device_indexes")
+        components.entry(frame, 12, 3, self.ui_state, "device_indexes")
 
         components.label(frame, 14, 0, "Gradient Reduce Precision",
                          tooltip="WEIGHT_DTYPE: Reduce gradients between GPUs in your weight data type; can be imprecise, but more efficient than float32\n"
