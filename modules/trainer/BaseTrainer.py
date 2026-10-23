@@ -1,4 +1,3 @@
-import os
 from abc import ABCMeta, abstractmethod
 
 from modules.model.BaseModel import BaseModel
@@ -10,7 +9,7 @@ from modules.util import create
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
 from modules.util.config.TrainConfig import TrainConfig, prepare_run_name
-from modules.util.tensorboard_util import TensorboardProcess
+from modules.util.tensorboard_util import TensorboardProcess, stop_tensorboard, tensorboard_args
 from modules.util.TimedActionMixin import TimedActionMixin
 from modules.util.TrainProgress import TrainProgress
 
@@ -22,11 +21,12 @@ class BaseTrainer(
     metaclass=ABCMeta,
 ):
 
-    tensorboard_subprocess: TensorboardProcess
+    tensorboard_subprocess: TensorboardProcess | None
 
     def __init__(self, config: TrainConfig, callbacks: TrainCallbacks, commands: TrainCommands):
         super().__init__()
         self.config = config
+        self.tensorboard_subprocess = None
         self.callbacks = callbacks
         self.commands = commands
         self.train_device = torch.device(self.config.train_device)
@@ -86,20 +86,9 @@ class BaseTrainer(
             self.config.training_method
         )
     def _start_tensorboard(self):
-        tensorboard_log_dir = os.path.join(self.config.workspace_dir, "tensorboard")
-
-        tensorboard_args = [
-            "--logdir",
-            tensorboard_log_dir,
-            "--port",
-            str(self.config.tensorboard_port),
-            "--samples_per_plugin=images=100,scalars=10000",
-        ]
-
-        if self.config.tensorboard_expose:
-            tensorboard_args.append("--bind_all")
-
-        self.tensorboard_subprocess = TensorboardProcess(tensorboard_args)
+        args = tensorboard_args(self.config)
+        self.tensorboard_subprocess = TensorboardProcess(args)
 
     def _stop_tensorboard(self):
-        self.tensorboard_subprocess.kill()
+        process, self.tensorboard_subprocess = self.tensorboard_subprocess, None
+        stop_tensorboard(process)

@@ -26,7 +26,7 @@ class BaseCloud(metaclass=ABCMeta):
         if (self.config.cloud.install_onetrainer or self.config.cloud.update_onetrainer) and not self.can_reattach():
             self._install_onetrainer(update=self.config.cloud.update_onetrainer)
 
-        if self.config.cloud.tensorboard_tunnel:
+        if self.config.cloud.tensorboard_tunnel and self.config.tensorboard:
             self._make_tensorboard_tunnel()
 
     def download_output_model(self, local_output_dir: str):

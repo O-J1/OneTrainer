@@ -5,6 +5,7 @@ import os
 import shutil
 import traceback
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 import modules.util.multi_gpu_util as multi
@@ -74,12 +75,7 @@ class GenericTrainer(BaseTrainer):
         reset_compile()
         init_compile()
 
-        if multi.is_master():
-            tensorboard_log_dir = os.path.join(config.workspace_dir, "tensorboard")
-            os.makedirs(Path(tensorboard_log_dir).absolute(), exist_ok=True)
-            self.tensorboard = SummaryWriter(os.path.join(tensorboard_log_dir, config.run_name))
-            if config.tensorboard and not config.tensorboard_always_on:
-                super()._start_tensorboard()
+        self.tensorboard = None
 
         self.model = None
         self.one_step_trained = False
@@ -87,6 +83,11 @@ class GenericTrainer(BaseTrainer):
 
     def start(self):
         if multi.is_master():
+            if self.config.tensorboard and not self.config.tensorboard_always_on:
+                super()._start_tensorboard()
+            tensorboard_log_dir = os.path.join(self.config.workspace_dir, "tensorboard")
+            self.tensorboard = SummaryWriter(os.path.join(tensorboard_log_dir, self.config.run_name))
+
             self.__save_config_to_workspace()
 
             if self.config.clear_cache_before_training and self.config.latent_caching:
@@ -861,6 +862,15 @@ class GenericTrainer(BaseTrainer):
         report_loss(*accum_loss_exchange.drain())
 
     def end(self):
+        with ExitStack() as cleanup:
+            for handle in self.grad_hook_handles:
+                cleanup.callback(handle.remove)
+            cleanup.callback(self._stop_tensorboard)
+            if self.tensorboard is not None:
+                cleanup.callback(self.tensorboard.close)
+            self._finish_training()
+
+    def _finish_training(self):
         if self.one_step_trained:
             self.model.evict()
 
@@ -894,12 +904,3 @@ class GenericTrainer(BaseTrainer):
 
         if self.model is not None:
             self.model.evict()
-
-        if multi.is_master():
-            self.tensorboard.close()
-
-            if self.config.tensorboard and not self.config.tensorboard_always_on:
-                super()._stop_tensorboard()
-
-        for handle in self.grad_hook_handles:
-            handle.remove()

@@ -70,6 +70,7 @@ def validate_path(
     prevent_overwrites: bool = False,
     output_is_dir: bool = False,
     output_format: str | None = None,
+    syntax_only: bool = False,
 ) -> str | None:
     """Return an error string if *value* is an invalid path, else ``None``."""
     if not value:
@@ -78,6 +79,9 @@ def validate_path(
     path_chars = value[4:] if _IS_WINDOWS and value.startswith("\\\\?\\") else value
     if _has_invalid_chars(path_chars):
         return "Path contains invalid characters" + _describe_invalid_chars(path_chars)
+
+    if syntax_only:
+        return None
 
     if value.startswith("cloud:"):
         cloud_path = value[6:]

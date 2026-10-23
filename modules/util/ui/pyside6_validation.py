@@ -49,6 +49,7 @@ class PySide6FieldValidator(BaseFieldValidator):
         super().__init__(ui_state, var_name, extra_validate, required)
         self.component = component
         self.var = var
+        self.ready = QtVar(False)  # Current input is validated and committed.
         self._original_style = component.styleSheet()
         self._original_tooltip = component.toolTip()
         self._tooltip_filter = _ErrorToolTipFilter(self)
@@ -65,12 +66,39 @@ class PySide6FieldValidator(BaseFieldValidator):
         var = self._get_var_safe(name)
         return var.get() if var is not None else default
 
+    def validate(self, value: str) -> str | None:
+        error = super().validate(value)
+        if error is None and self.var_name == "tensorboard_port":
+            if not value or not 1 <= int(value) <= 65535:
+                return "Tensorboard port must be between 1 and 65535"
+        return error
+
+    def _cloud_enabled(self) -> bool:
+        # Editors can own a concept/embedding state instead of the training state.
+        # Resolve through widget parents at validation time (after layout parenting).
+        if self._get_value("cloud.enabled", False):
+            return True
+        widget = self.component
+        while widget is not None:
+            state = getattr(widget, "ui_state", None)
+            if state is not None:
+                try:
+                    return bool(state.get_var("cloud.enabled").get())
+                except (KeyError, AttributeError):
+                    pass
+            config = getattr(getattr(widget, "controller", None), "train_config", None)
+            if config is not None:
+                return config.cloud.enabled
+            widget = widget.parentWidget()
+        return False
+
     def _trace(self, name: str, callback) -> None:
         var = self._get_var_safe(name)
         if var is not None:
             self._traces.append((var, var.trace_add("write", callback)))
 
     def _apply_error(self) -> None:
+        self.ready.set(False)
         error = self.validate(self.component.text())
         self.component.setStyleSheet(
             f"{self._original_style}\nQLineEdit {{ border: 1px solid {ERROR_BORDER_COLOR}; }}"
@@ -99,6 +127,7 @@ class PySide6FieldValidator(BaseFieldValidator):
         self.component.destroyed.connect(self._on_destroyed)
         self._bound = True
         _active_validators.add(self)
+        self.ready.set(self.validate(self.component.text()) is None)
 
     def _on_destroyed(self) -> None:
         self._bound = False
@@ -126,6 +155,7 @@ class PySide6FieldValidator(BaseFieldValidator):
                 self.var.set(value)
             finally:
                 self._syncing = False
+        self.ready.set(True)
 
     def _replace_text(self, value: str) -> None:
         # Unlike setText(), an edit preserves QLineEdit's native undo history.
@@ -151,6 +181,7 @@ class PySide6FieldValidator(BaseFieldValidator):
 
     def _on_text_changed(self, _text: str) -> None:
         if not self._syncing:
+            self.ready.set(False)
             self._cleaned_value = None
             self._touched = True
             self._debounce.start()
@@ -177,7 +208,8 @@ class PySide6FieldValidator(BaseFieldValidator):
 
     def revalidate(self, *_args) -> None:
         if self._bound:
-            self._validate_and_style(self.component.text())
+            valid = self._validate_and_style(self.component.text())
+            self.ready.set(valid and not self._debounce.isActive() and self.component.text() == str(self.var.get()))
 
     def flush(self) -> str | None:
         self._debounce.stop()
@@ -198,6 +230,8 @@ class PySide6PathValidator(PySide6FieldValidator):
         self.output_is_dir = output_is_dir
 
     def _cleanup(self, value: str) -> str:
+        if self._cloud_enabled():
+            return value.strip()
         return autocorrect_path(value, self.io_type)
 
     def validate(self, value: str) -> str | None:
@@ -205,6 +239,7 @@ class PySide6PathValidator(PySide6FieldValidator):
         if error is not None or value == "":
             return error
         return validate_path(value, self.io_type, output_is_dir=self.output_is_dir,
+                             syntax_only=self._cloud_enabled(),
                              prevent_overwrites=self._get_value("prevent_overwrites", False),
                              output_format=self._get_value("output_model_format"))
 
@@ -262,5 +297,7 @@ class PySide6RunNameValidator(PySide6FieldValidator):
             return "Run name must not end with a file extension"
         output_format = ModelFormat[str(self._get_value("output_model_format", "SAFETENSORS"))]
         destination = get_output_model_destination(self._get_value("final_output_dir", ""), value, output_format)
+        if self._cloud_enabled():
+            return None
         return _check_overwrite(destination, is_dir=not output_format.is_single_file(),
                                 prevent=self._get_value("prevent_overwrites", False))

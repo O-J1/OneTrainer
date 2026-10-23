@@ -1,7 +1,6 @@
 import datetime as dt
 import json
 import os
-import subprocess
 import threading
 import time
 import traceback
@@ -19,7 +18,7 @@ from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
 from modules.util.config.TrainConfig import TrainConfig, prepare_run_name
 from modules.util.profiling_util import PeakMemoryRecorder
-from modules.util.tensorboard_util import TensorboardProcess
+from modules.util.tensorboard_util import TensorboardProcess, stop_tensorboard, tensorboard_args
 from modules.util.torch_util import print_fragmentation, torch_gc
 from modules.util.TrainProgress import TrainProgress
 from modules.util.ui.validation import flush_and_validate_all
@@ -39,7 +38,7 @@ class TrainUIController:
         self.training_callbacks: TrainCallbacks | None = None
         self.training_commands: TrainCommands | None = None
         self.always_on_tensorboard_subprocess = None
-        self.current_workspace_dir = config.workspace_dir
+        self._tensorboard_args = None
         self.start_time: float | None = None
         self.start_total_steps: int | None = None
 
@@ -87,68 +86,47 @@ class TrainUIController:
             return f"{seconds}s"
 
     def _check_start_always_on_tensorboard(self):
-        if self.train_config.tensorboard_always_on and not self.always_on_tensorboard_subprocess:
-            self._start_always_on_tensorboard()
+        schedule = getattr(self.view, "request_tensorboard_update", None)
+        if schedule is not None:
+            schedule()
+        else:
+            self._reconcile_tensorboard()
 
-    def _start_always_on_tensorboard(self):
-        if self.always_on_tensorboard_subprocess:
+    def _reconcile_tensorboard(self):
+        if self.training_thread is not None:
+            return
+        config = self.train_config
+        tunnel = config.cloud.enabled and config.cloud.tensorboard_tunnel
+        if config.tensorboard_always_on and not tunnel:
+            self._start_always_on_tensorboard()
+        else:
             self._stop_always_on_tensorboard()
 
-        tensorboard_log_dir = os.path.join(self.train_config.workspace_dir, "tensorboard")
-
-        os.makedirs(Path(tensorboard_log_dir).absolute(), exist_ok=True)
-
-        tensorboard_args = [
-            "--logdir",
-            tensorboard_log_dir,
-            "--port",
-            str(self.train_config.tensorboard_port),
-            "--samples_per_plugin=images=100,scalars=10000",
-        ]
-
-        if self.train_config.tensorboard_expose:
-            tensorboard_args.append("--bind_all")
-
+    def _start_always_on_tensorboard(self):
         try:
-            self.always_on_tensorboard_subprocess = TensorboardProcess(tensorboard_args)
-        except Exception:
-            traceback.print_exc()
-            self.always_on_tensorboard_subprocess = None
+            args = tensorboard_args(self.train_config)
+            if (self.always_on_tensorboard_subprocess is not None
+                    and self.always_on_tensorboard_subprocess.poll() is None and args == self._tensorboard_args):
+                return
+            self._stop_always_on_tensorboard()
+            self.always_on_tensorboard_subprocess = TensorboardProcess(args)
+            self._tensorboard_args = args
+        except Exception as error:
+            self.on_update_status(f"Tensorboard: {error}")
 
     def _stop_always_on_tensorboard(self):
-        if self.always_on_tensorboard_subprocess:
-            try:
-                self.always_on_tensorboard_subprocess.terminate()
-                self.always_on_tensorboard_subprocess.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.always_on_tensorboard_subprocess.kill()
-            except Exception:
-                pass
-            finally:
-                self.always_on_tensorboard_subprocess = None
+        process, self.always_on_tensorboard_subprocess = self.always_on_tensorboard_subprocess, None
+        self._tensorboard_args = None
+        stop_tensorboard(process)
 
-    def _on_workspace_dir_change(self, new_workspace_dir: str):
-        if new_workspace_dir != self.current_workspace_dir:
-            self.current_workspace_dir = new_workspace_dir
+    def _on_workspace_dir_change(self, _new_workspace_dir: str):
+        self._check_start_always_on_tensorboard()
 
-            if self.train_config.tensorboard_always_on and self.always_on_tensorboard_subprocess:
-                self._start_always_on_tensorboard()
-
-    def _on_workspace_dir_change_trace(self, *args):
-        new_workspace_dir = self.train_config.workspace_dir
-        if new_workspace_dir != self.current_workspace_dir:
-            self.current_workspace_dir = new_workspace_dir
-
-            if self.train_config.tensorboard_always_on and self.always_on_tensorboard_subprocess:
-                self._start_always_on_tensorboard()
+    def _on_workspace_dir_change_trace(self, *_args):
+        self._check_start_always_on_tensorboard()
 
     def _on_always_on_tensorboard_toggle(self):
-        if self.train_config.tensorboard_always_on:
-            if not (self.training_thread and self.train_config.tensorboard):
-                self._start_always_on_tensorboard()
-        else:
-            if not (self.training_thread and self.train_config.tensorboard):
-                self._stop_always_on_tensorboard()
+        self._check_start_always_on_tensorboard()
 
     def open_tensorboard(self):
         webbrowser.open("http://localhost:" + str(self.train_config.tensorboard_port), new=0, autoraise=False)
@@ -253,8 +231,9 @@ class TrainUIController:
             on_update_status=self.on_update_status,
         )
 
-        trainer = create.create_trainer(self.train_config, self.training_callbacks, self.training_commands, reattach=self.view.get_cloud_reattach())
+        trainer = None
         try:
+            trainer = create.create_trainer(self.train_config, self.training_callbacks, self.training_commands, reattach=self.view.get_cloud_reattach())
             trainer.start()
             if self.train_config.cloud.enabled:
                 self.view.sync_cloud_secrets()
@@ -275,13 +254,19 @@ class TrainUIController:
             if self.train_config.debug_mode or os.environ.get("OT_DEBUG_PROFILES") == "1":
                 print_fragmentation("training run, at stop")
 
-        trainer.end()
+            if trainer is not None:
+                try:
+                    trainer.end()
+                except Exception:
+                    error_caught = True
+                    traceback.print_exc()
 
         # clear gpu memory
         del trainer
 
         self.training_thread = None
         self.training_commands = None
+        self.training_callbacks = None
         torch.clear_autocast_cache()
         torch_gc()
 
@@ -294,11 +279,10 @@ class TrainUIController:
         else:
             self.on_update_status("Stopped")
 
-        # queue UI update on Tk main thread; on_training_stopped applies shared styles, avoid potential race/crash
+        # Queue widget updates on the UI thread.
         self.view.schedule_on_main_thread(lambda: self.view.on_training_stopped(error_caught))
 
-        if self.train_config.tensorboard_always_on and not self.always_on_tensorboard_subprocess:
-            self.view.schedule_on_main_thread(self._start_always_on_tensorboard)
+        self.view.schedule_on_main_thread(self._check_start_always_on_tensorboard)
 
     def sync_run_name(self, *, is_new_invocation: bool = False):
         name = prepare_run_name(self.train_config.training_method, self.train_config.run_name_mode,
@@ -308,6 +292,9 @@ class TrainUIController:
     def start_training(self):
         if self.training_thread is None:
             errors = flush_and_validate_all()
+            if ((self.train_config.tensorboard or self.train_config.tensorboard_always_on)
+                    and self.train_config.workspace_dir.startswith("cloud:")):
+                errors.append("Tensorboard requires a local workspace for downloaded logs")
             if errors:
                 self.view.show_validation_errors(errors)
                 return
@@ -319,10 +306,8 @@ class TrainUIController:
                 return
 
             self.view.save_default()
+            self._reconcile_tensorboard()
             self.view.on_training_started()
-
-            if self.train_config.tensorboard and not self.train_config.tensorboard_always_on and self.always_on_tensorboard_subprocess:
-                self._stop_always_on_tensorboard()
 
             self.training_commands = TrainCommands()
             torch_gc()

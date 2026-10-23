@@ -4,7 +4,43 @@ import subprocess
 import sys
 import threading
 
+from modules.util.enum.PathIOType import PathIOType
 from modules.util.tqdm_util import tqdm
+from modules.util.ui.validation import validate_path
+
+
+def tensorboard_mode(config):
+    # older presets allowed always-on with the Tensorboard checkbox off
+    return "Always-on" if config.tensorboard_always_on else "Training" if config.tensorboard else "Off"
+
+
+def tensorboard_args(config):
+    """Validate before callers create directories or replace a running server."""
+    workspace = config.workspace_dir
+    error = validate_path(workspace, PathIOType.OUTPUT, output_is_dir=True)
+    if workspace.startswith("cloud:"):
+        error = "Tensorboard requires a local workspace for downloaded logs"
+    if error:
+        raise ValueError(error)
+    if not isinstance(config.tensorboard_port, int) or not 1 <= config.tensorboard_port <= 65535:
+        raise ValueError("Tensorboard port must be between 1 and 65535")
+    args = ["--logdir", os.path.abspath(os.path.join(workspace, "tensorboard")),
+            "--port", str(config.tensorboard_port), "--samples_per_plugin=images=100,scalars=10000"]
+    if config.tensorboard_expose:
+        args.append("--bind_all")
+    return args
+
+
+def stop_tensorboard(process):
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 # Match only known startup notices; unknown output must remain visible.
 _QUIET_LINES = {

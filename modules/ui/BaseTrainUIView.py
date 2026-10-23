@@ -165,14 +165,7 @@ class BaseTrainUIView(ABC):
                          tooltip="The directory where debug data is saved")
         self.components.path_entry(frame, 4, 3, ui_state, "debug_dir", mode="dir", io_type=PathIOType.OUTPUT)
 
-        # tensorboard
-        self.components.label(frame, 6, 0, "Tensorboard",
-                         tooltip="Starts the Tensorboard Web UI during training")
-        self.components.switch(frame, 6, 1, ui_state, "tensorboard")
-
-        self.components.label(frame, 6, 2, "Always-On Tensorboard",
-                         tooltip="Keep Tensorboard accessible even when not training. Useful for monitoring completed training sessions.")
-        self.components.switch(frame, 6, 3, ui_state, "tensorboard_always_on", command=controller._on_always_on_tensorboard_toggle)
+        self.build_tensorboard_controls(frame, controller, ui_state)
 
         self.components.label(frame, 7, 0, "Expose Tensorboard",
                          tooltip="Exposes Tensorboard Web UI to all network interfaces (makes it accessible from the network)")
@@ -277,6 +270,17 @@ class BaseTrainUIView(ABC):
         self.components.label(sub_frame, 0, 2, "Samples to Tensorboard",
                          tooltip="Whether to include sample images in the Tensorboard output.")
         self.components.switch(sub_frame, 0, 3, ui_state, "samples_to_tensorboard")
+
+    def build_tensorboard_controls(self, frame, controller, ui_state):
+        # tensorboard
+        self.components.label(frame, 6, 0, "Tensorboard",
+                         tooltip="Starts the Tensorboard Web UI during training")
+        self.components.switch(frame, 6, 1, ui_state, "tensorboard")
+
+        self.components.label(frame, 6, 2, "Always-On Tensorboard",
+                         tooltip="Keep Tensorboard accessible even when not training. Useful for monitoring completed training sessions.")
+        self.components.switch(frame, 6, 3, ui_state, "tensorboard_always_on", command=controller._on_always_on_tensorboard_toggle)
+
 
     def build_backup_tab_content(self, frame, controller, ui_state):
         # backup after

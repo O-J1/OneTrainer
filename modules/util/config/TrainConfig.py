@@ -483,7 +483,7 @@ class TrainConfig(BaseConfig):
     tensorboard: bool
     tensorboard_expose: bool
     tensorboard_always_on: bool
-    tensorboard_port: str
+    tensorboard_port: int
     validation: bool
     validate_after: float
     validate_after_unit: TimeUnit

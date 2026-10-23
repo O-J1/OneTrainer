@@ -28,10 +28,13 @@ from modules.ui.TrainUIController import TrainUIController
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.enum.ModelType import ModelType
 from modules.util.enum.TrainingMethod import TrainingMethod
+from modules.util.tensorboard_util import tensorboard_mode
 from modules.util.ui import pyside6_components
 from modules.util.ui.pyside6_settings import MainWindowSettings
 from modules.util.ui.pyside6_util import QtABCMeta, get_theme_controller
+from modules.util.ui.pyside6_validation import PySide6PathValidator, PySide6RunNameValidator
 from modules.util.ui.PySide6UIState import PySide6UIState
+from modules.util.ui.validation import _active_validators
 
 from PySide6.QtCore import QSettings, QSignalBlocker, QTimer
 from PySide6.QtGui import QIcon
@@ -48,6 +51,11 @@ class PySide6TrainView(BaseTrainUIView, QMainWindow, metaclass=QtABCMeta):
 
         BaseTrainUIView.__init__(self, pyside6_components, controller, ui_state)
         self.controller.view = self
+        self._tensorboard_timer = QTimer(self)
+        self._tensorboard_timer.setSingleShot(True)
+        self._tensorboard_timer.setInterval(500)
+        self._tensorboard_timer.timeout.connect(self._update_tensorboard)
+        self._tensorboard_traces = []
 
         self.setWindowTitle("OneTrainer")
         self.setWindowIcon(QIcon("resources/icons/icon.png"))
@@ -93,12 +101,24 @@ class PySide6TrainView(BaseTrainUIView, QMainWindow, metaclass=QtABCMeta):
         self._profiling_controller = ProfilingWindowController()
         self.profiling_window = self._profiling_controller.create_window(self, PySide6ProfilingWindowView)
 
-        self.controller._check_start_always_on_tensorboard()
-        self.workspace_dir_trace_id = self.ui_state.add_var_trace(
-            "workspace_dir", self.controller._on_workspace_dir_change_trace
-        )
+        self._watch_tensorboard_settings()
         self.window_settings = MainWindowSettings(self, self.tabview, self._tab_widgets, QSettings())
         self.window_settings.restore()
+
+    def _watch_tensorboard_settings(self):
+        self._tensorboard_readiness = [
+            validator.ready for validator in _active_validators
+            if validator.ui_state is self.ui_state and validator.var_name in ("workspace_dir", "tensorboard_port")
+        ]
+        for ready in self._tensorboard_readiness:
+            self._tensorboard_traces.append((ready, ready.trace_add("write", self.request_tensorboard_update)))
+        for name in ("tensorboard", "tensorboard_always_on",
+                     "tensorboard_expose", "cloud.enabled", "cloud.tensorboard_tunnel"):
+            var = self.ui_state.get_var(name)
+            self._tensorboard_traces.append((var, var.trace_add("write", self.request_tensorboard_update)))
+        var = self.ui_state.get_var("cloud.enabled")
+        self._tensorboard_traces.append((var, var.trace_add("write", self._revalidate_cloud_paths)))
+        self.request_tensorboard_update()
 
     def closeEvent(self, event):
         if self.controller.training_thread is not None and self.controller.training_thread.is_alive():
@@ -110,8 +130,10 @@ class PySide6TrainView(BaseTrainUIView, QMainWindow, metaclass=QtABCMeta):
             event.ignore()
             return
         self.top_bar_component.save_default()
+        self._tensorboard_timer.stop()
         self.controller._stop_always_on_tensorboard()
-        self.ui_state.remove_var_trace("workspace_dir", self.workspace_dir_trace_id)
+        for var, trace_id in self._tensorboard_traces:
+            var.trace_remove("write", trace_id)
         self.window_settings.save()
         event.accept()
 
@@ -128,6 +150,42 @@ class PySide6TrainView(BaseTrainUIView, QMainWindow, metaclass=QtABCMeta):
         self.controller.sync_run_name(is_new_invocation=True)
         self.eta_label.setText("")
         self._set_training_button_style("idle")
+
+    def _revalidate_cloud_paths(self, *_args):
+        for validator in list(_active_validators):
+            if isinstance(validator, (PySide6PathValidator, PySide6RunNameValidator)):
+                validator.revalidate()
+
+    def request_tensorboard_update(self, *_args):
+        self._tensorboard_timer.start()
+
+    def _update_tensorboard(self):
+        if self.ui_state.updating:
+            self.request_tensorboard_update()
+            return
+        with QSignalBlocker(self.tensorboard_mode_dropdown):
+            self.tensorboard_mode_dropdown.setCurrentText(tensorboard_mode(self.controller.train_config))
+        config = self.controller.train_config
+        if (config.tensorboard_always_on and not (config.cloud.enabled and config.cloud.tensorboard_tunnel)
+                and not all(ready.get() for ready in self._tensorboard_readiness)):
+            return
+        self.controller._reconcile_tensorboard()
+
+    def build_tensorboard_controls(self, frame, controller, ui_state):
+        pyside6_components.label(frame, 6, 0, "Tensorboard mode",
+                                tooltip="Off, during training, or always available locally. Tensorboard setting changes apply after the current run. "
+                                        "Cloud tunnels are available only during cloud training.")
+        combo = pyside6_components.NoScrollComboBox(frame)
+        combo.addItems(["Off", "Training", "Always-on"])
+        combo.setCurrentText(tensorboard_mode(controller.train_config))
+        pyside6_components._layout(frame).addWidget(combo, 6, 1)
+        self.tensorboard_mode_dropdown = combo
+
+        def change_mode(mode):
+            ui_state.get_var("tensorboard").set(mode != "Off")
+            ui_state.get_var("tensorboard_always_on").set(mode == "Always-on")
+
+        combo.currentTextChanged.connect(change_mode)
 
     def on_training_stopping(self):
         self._set_training_button_style("stopping")

@@ -2,6 +2,7 @@ import pickle
 import shlex
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from modules.cloud.BaseCloud import BaseCloud
@@ -24,6 +25,7 @@ class LinuxCloud(BaseCloud):
         self.callback_connection=None
         self.command_connection=None
         self.tensorboard_tunnel_stop=None
+        self.tensorboard_tunnel = None
 
         name=config.cloud.run_id if config.cloud.detach_trainer else get_string_timestamp()
         self.callback_file=f'{config.cloud.remote_dir}/{name}.callback'
@@ -119,19 +121,19 @@ class LinuxCloud(BaseCloud):
         )
         self.tensorboard_tunnel.start()
 
-
     def close(self):
-        if self.tensorboard_tunnel_stop is not None:
-            self.tensorboard_tunnel_stop.set()
-        if self.callback_connection:
-            self.callback_connection.close()
-        if self.command_connection:
-            self.command_connection.close()
-        if self.file_sync:
-            self.file_sync.close()
-        if self.connection:
-            self.connection.close()
-            self.connection=None
+        with ExitStack() as cleanup:
+            for name in ("connection", "file_sync", "command_connection", "callback_connection"):
+                resource = getattr(self, name)
+                if resource is not None:
+                    cleanup.callback(resource.close)
+                    setattr(self, name, None)
+            if self.tensorboard_tunnel_stop is not None:
+                self.tensorboard_tunnel_stop.set()
+                if self.tensorboard_tunnel.is_alive():
+                    self.tensorboard_tunnel.join(timeout=5)
+                self.tensorboard_tunnel_stop = None
+                self.tensorboard_tunnel = None
 
     def can_reattach(self):
         result=self.connection.run(f"test -f {self.pid_file}",warn=True,in_stream=False)
